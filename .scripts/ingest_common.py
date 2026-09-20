@@ -538,6 +538,8 @@ def _prepare_semantic_agent_task(state: dict, repo: Path, issues: list, *,
             raise ValueError("semantic staged artifact 必须位于仓库内") from exc
         if relative.parts and relative.parts[0] == "temp":
             semantic_value = relative.as_posix()
+            # 回写规范化路径（Unix 上值相同，行为不变；Windows 修正反斜杠）。
+            state["semantic_path"] = semantic_value
         else:
             semantic_value = ""
     if not semantic_value:
@@ -549,7 +551,8 @@ def _prepare_semantic_agent_task(state: dict, repo: Path, issues: list, *,
             else str(state.get("slots_content") or "")
         )
         semantic_file.write_text(semantic_text, encoding="utf-8")
-        semantic_value = str(semantic_file.relative_to(repo))
+        # 统一正斜杠（Unix 上 as_posix() 与 str() 等价，行为不变）。
+        semantic_value = semantic_file.relative_to(repo).as_posix()
         state["semantic_path"] = semantic_value
     inputs = [{
         "name": "semantic_slots", "path": semantic_value,
@@ -1816,14 +1819,14 @@ def run_resume_post_maintenance(state: dict) -> dict | None:
                     "actions": [],
                     "errors": [],
                     "components": {},
-                    "report_path": str(report_path.relative_to(repo)),
+                    "report_path": report_path.relative_to(repo).as_posix(),
                 }
             existing = report.get("maintenance") or {}
             if (existing.get("publication", {}).get("status") in {"pending", "error"}
                     or existing.get("status") not in {"skipped", "deferred", "error", ""}):
                 publish_maintenance_report(report_path, report)
                 compact = compact_maintenance(report["maintenance"])
-                compact["report_path"] = str(report_path.relative_to(repo))
+                compact["report_path"] = report_path.relative_to(repo).as_posix()
                 return compact
             envelope = run_post_ingest_maintenance(
                 report["files"], str(report.get("session_id") or "resume-batch")
@@ -1834,7 +1837,7 @@ def run_resume_post_maintenance(state: dict) -> dict | None:
             )
             publish_maintenance_report(report_path, report)
             compact = compact_maintenance(report["maintenance"])
-            compact["report_path"] = str(report_path.relative_to(repo))
+            compact["report_path"] = report_path.relative_to(repo).as_posix()
             return compact
         transaction_id = str(state.get("transaction_id", "resume"))
         result = [_resume_result_item(state)]
@@ -1861,7 +1864,7 @@ def run_resume_post_maintenance(state: dict) -> dict | None:
         }
         publish_maintenance_report(report_path, report)
         compact = compact_maintenance(report["maintenance"])
-        compact["report_path"] = str(report_path.relative_to(repo))
+        compact["report_path"] = report_path.relative_to(repo).as_posix()
         return compact
     except Exception as exc:
         return {

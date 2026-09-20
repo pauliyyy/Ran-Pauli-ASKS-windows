@@ -36,7 +36,10 @@ def split_locator(value):
     match = LOCATOR_RE.match(str(value or "").strip())
     if not match:
         return "", ""
-    return match.group("path").strip(), (match.group("locator") or "").strip()
+    # Windows 上 str(relative_to(...)) 产生反斜杠；locator 统一用正斜杠表示，
+    # 在解析入口规范化（Unix 上是无操作，行为不变）。
+    path = match.group("path").strip().replace("\\", "/")
+    return path, (match.group("locator") or "").strip()
 
 def candidate_paths(path, base_path=None):
     path = str(path).strip()

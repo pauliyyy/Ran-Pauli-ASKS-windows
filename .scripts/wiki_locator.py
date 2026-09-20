@@ -279,7 +279,10 @@ def graph_wiki_source(path: Path | str, *terms: str) -> tuple[str, list[str]] | 
     item = best_cited_section(target, *terms)
     if item is None:
         return "", []
-    rel = str(target.resolve().relative_to(REPO.resolve())).removesuffix(".md")
+    # 统一返回正斜杠相对路径（Unix 上 as_posix() 与 str() 等价，行为不变）。
+    rel = target.resolve().relative_to(REPO.resolve()).as_posix()
+    if rel.endswith(".md"):
+        rel = rel[: -len(".md")]
     return f"{rel}#{item.slug}", list(item.raw_citations)
 
 

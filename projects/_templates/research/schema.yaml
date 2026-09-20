@@ -1,0 +1,11 @@
+project:
+  id: {{PROJECT_ID}}
+  name: {{PROJECT_NAME}}
+  type: research
+  stage: {{STAGE}}
+  topic: {{TOPIC}}
+structure: {}
+compute: {}
+artifact_policy:
+  all_products_inside_project: true
+code_management: {}

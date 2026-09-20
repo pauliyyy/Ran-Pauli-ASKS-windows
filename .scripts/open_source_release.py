@@ -386,13 +386,15 @@ def git_ignored_files(destination: Path, paths: set[str]) -> list[str]:
     checked = subprocess.run(
         ["git", "check-ignore", "--no-index", "--stdin"],
         cwd=destination,
-        input="\n".join(sorted(paths)) + "\n",
-        text=True,
+        # 字节输入：Windows text 模式会把 \n 翻译成 \r\n，导致 git 检查带 \r 的错误路径。
+        input=("\n".join(sorted(paths)) + "\n").encode("utf-8"),
         capture_output=True,
     )
     if checked.returncode not in (0, 1):
-        raise ValueError(f"git ignore audit failed: {checked.stderr.strip()}")
-    return [line for line in checked.stdout.splitlines() if line]
+        raise ValueError(f"git ignore audit failed: {checked.stderr.decode('utf-8', 'replace').strip()}")
+    # 输出同样按字节解码并清洗行尾（Windows git 可能输出 CRLF）。
+    stdout_text = checked.stdout.decode("utf-8", "replace")
+    return [line.strip("\r") for line in stdout_text.splitlines() if line.strip("\r")]
 
 
 def documentation_omission_errors(destination: Path, manifest: dict, files: set[str]) -> list[str]:

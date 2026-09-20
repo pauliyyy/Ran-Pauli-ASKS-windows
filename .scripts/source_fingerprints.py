@@ -72,7 +72,8 @@ def normalized_text_sha256(path: Path) -> str:
 
 def _stored_path(path: Path, repo: Path) -> str:
     try:
-        return str(path.resolve().relative_to(repo.resolve()))
+        # 统一正斜杠存储（Unix 上 as_posix() 与 str() 等价，行为不变）。
+        return path.resolve().relative_to(repo.resolve()).as_posix()
     except ValueError:
         return str(path.resolve())
 

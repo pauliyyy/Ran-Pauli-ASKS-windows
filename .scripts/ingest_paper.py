@@ -239,7 +239,8 @@ def new_state_for_pdf(pdf_path: Path) -> dict:
     return {
         "transaction_id": datetime.now().strftime("%Y%m%d-%H%M%S-%f") + "-" + slugify(pdf_path.stem)[:20],
         "status": "dedup_check",
-        "source": str(pdf_path.relative_to(REPO)),
+        # 统一正斜杠（Unix 上 as_posix() 与 str() 等价，行为不变）。
+        "source": pdf_path.relative_to(REPO).as_posix(),
         "retry_count": 0,
         "errors": [],
     }
@@ -253,12 +254,13 @@ def new_state_for_raw(raw_path: Path) -> dict:
     """
     import shutil
     paper_id = raw_path.parent.name
-    raw_md_rel = str(raw_path.relative_to(REPO))
+    # 统一正斜杠（Unix 上 as_posix() 与 str() 等价，行为不变）。
+    raw_md_rel = raw_path.relative_to(REPO).as_posix()
     txn = "raw-" + datetime.now().strftime("%Y%m%d-%H%M%S-") + slugify(paper_id)[:30]
     extract_dir = REPO / "temp" / "raw-extract" / txn
     extract_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(raw_path, extract_dir / "paper.md")
-    raw_dir = str(raw_path.parent.relative_to(REPO))
+    raw_dir = raw_path.parent.relative_to(REPO).as_posix()
     md_text = raw_path.read_text(encoding="utf-8")
     bibliography, corrections = repair_archived_bibliography(
         load_bibliographic_metadata(raw_path.parent), md_text)
@@ -266,7 +268,7 @@ def new_state_for_raw(raw_path: Path) -> dict:
         "transaction_id": txn,
         "status": "write_wiki",
         "source": raw_md_rel,
-        "extract_dir": str(extract_dir.relative_to(REPO)),
+        "extract_dir": extract_dir.relative_to(REPO).as_posix(),
         "raw_dir": raw_dir,
         "wiki_path": f"academic/wiki/papers/{paper_id}",
         "paper_id": paper_id,
@@ -4699,6 +4701,30 @@ def step_validate_semantics(state: dict) -> tuple[list[str], list[dict]]:
     hard_errors: 结构性错误（谓词非法、解析失败），需回 3.3 全量重生成。
     slot_warnings: 客体内容问题（描述性短语、裸缩写），可走局部修复。
     """
+    # lazy resolve 上下文：仅首次命中裸缩写时才开图(~7ms)+构建索引(~7ms)
+    resolve_ctx = None
+    def _resolve_ctx():
+        nonlocal resolve_ctx
+        if resolve_ctx is None:
+            import graph_lib as gl
+            from graph_ingest import bare_tokens_resolvable as _btr
+            conn = gl.connect()
+            ti, ai, si = gl.build_name_index(conn)
+            resolve_ctx = (_btr, conn, ti, ai, si)
+        return resolve_ctx
+    try:
+        return _step_validate_semantics_impl(state, _resolve_ctx)
+    finally:
+        # Windows: 显式关闭 lazy 打开的图连接，避免句柄悬挂（Unix 上无影响）。
+        if resolve_ctx is not None:
+            try:
+                resolve_ctx[1].close()
+            except Exception:
+                pass
+            resolve_ctx = None
+
+
+def _step_validate_semantics_impl(state: dict, _resolve_ctx) -> tuple[list[str], list[dict]]:
     semantic_path = REPO / state["semantic_path"]
     sem_text = semantic_path.read_text(encoding="utf-8")
     # 三段式裸缩写消解第二步: alias 未命中时从 raw paper.md 查全称,自动补全为 full(ABBR) 格式
@@ -4712,24 +4738,7 @@ def step_validate_semantics(state: dict) -> tuple[list[str], list[dict]]:
     hard_errors = []
     slot_warnings = []
     candidates = []
-    # lazy resolve 上下文：仅首次命中裸缩写时才开图(~7ms)+构建索引(~7ms)
-    resolve_ctx = None
-    def _resolve_ctx():
-        nonlocal resolve_ctx
-        if resolve_ctx is None:
-            import graph_lib as gl
-            from graph_ingest import bare_tokens_resolvable as _btr
-            conn = gl.connect()
-            ti, ai, si = gl.build_name_index(conn)
-            resolve_ctx = (_btr, conn, ti, ai, si)
-        return resolve_ctx
     # 格式检查（同行 header）→ 硬错误，需回 3.3
-    try:
-        import graph_ingest
-        warns = graph_ingest.detect_inline_section_headers(sem_text)
-        hard_errors.extend(warns)
-    except Exception:
-        pass
     # 解析语义槽
     try:
         import graph_ingest

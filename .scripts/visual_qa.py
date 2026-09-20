@@ -231,6 +231,13 @@ def _find_soffice(explicit: str | None = None) -> Path:
     if found:
         candidates.append(Path(found))
     candidates.append(Path("/Applications/LibreOffice.app/Contents/MacOS/soffice"))
+    if sys.platform == "win32":
+        # Windows 常见 LibreOffice 安装位置。
+        for hint in (
+            r"C:\Program Files\LibreOffice\program\soffice.exe",
+            r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+        ):
+            candidates.append(Path(hint))
     runtime_root = Path.home() / ".cache" / "codex-runtimes"
     if runtime_root.exists():
         candidates.extend(sorted(runtime_root.glob(

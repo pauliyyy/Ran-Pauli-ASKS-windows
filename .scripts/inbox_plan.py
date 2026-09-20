@@ -76,17 +76,18 @@ def build_plan(inbox: Path) -> dict:
         if path.name == ".gitkeep" or not path.is_file():
             continue
         if inbox_source_policy.is_retained(REPO, path):
-            retained_sources.append(str(path.relative_to(REPO)))
+            # 统一正斜杠相对路径（Unix 上与 str() 等价）。
+            retained_sources.append(path.relative_to(REPO).as_posix())
             continue
         details = classify(path)
-        items.append({"path": str(path.relative_to(REPO)), "size_bytes": path.stat().st_size, **details})
+        items.append({"path": path.relative_to(REPO).as_posix(), "size_bytes": path.stat().st_size, **details})
     ordinary = [item for item in items if item["kind"] != "user-assertions"]
     batch_candidates = [item for item in ordinary if item["subproject"] == "academic" and item["content"] == "paper"]
     batch_eligible = len(ordinary) >= 3 and len(batch_candidates) == len(ordinary)
     return {
         "version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "inbox": str(inbox.relative_to(REPO)),
+        "inbox": inbox.relative_to(REPO).as_posix(),
         "items": items,
         "retained_sources": retained_sources,
         "routing": {

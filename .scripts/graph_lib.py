@@ -187,8 +187,12 @@ def _ensure_aliases_many_to_many(conn):
 
 @contextmanager
 def graph_writer_lock(db_path=None):
-    """Serialize live graph simulations and commits across Agent processes."""
-    import fcntl
+    """Serialize live graph simulations and commits across Agent processes.
+
+    跨平台（2026-09-20 Windows 适配）：Unix 走 fcntl.flock（原实现，行为不变）；
+    Windows 走 win_compat.lock_file（msvcrt.locking 独占锁，进程退出自动释放）。
+    """
+    from win_compat import lock_file
 
     target = Path(db_path or GRAPH_DB).resolve()
     digest = hashlib.sha256(str(target).encode("utf-8")).hexdigest()[:16]
@@ -196,11 +200,8 @@ def graph_writer_lock(db_path=None):
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / f"{target.name}-{digest}.lock"
     with lock_path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
+        with lock_file(handle):
             yield target
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def connect(db_path=None):

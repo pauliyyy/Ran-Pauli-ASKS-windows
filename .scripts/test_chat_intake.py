@@ -248,7 +248,8 @@ class ChatIntakeTest(unittest.TestCase):
                 self.assertEqual(staged.read_bytes(), before)
                 self.assertEqual(original.read_bytes(), before)
                 command = run.call_args.args[0]
-                self.assertIn(str(staged.relative_to(self.repo)), command)
+                # 仓库内相对路径统一正斜杠（Windows 上 str() 会产生反斜杠）。
+                self.assertIn(staged.relative_to(self.repo).as_posix(), command)
                 self.assertNotIn(str(original), command)
 
     def test_wrapper_preserves_inbox_attachment(self):

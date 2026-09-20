@@ -41,7 +41,9 @@ def test_relative_link_survives_copy_and_directory_rename():
         source.write_bytes(b"pdf")
         link = original / "nested" / "paper.pdf"
         link.parent.mkdir()
-        link.symlink_to("../source/file.pdf")
+        # Windows: 相对符号链接目标必须用本机分隔符（os.path.relpath），
+        # 前斜杠在 NTFS 符号链接里被当字面字符、无法解析。
+        link.symlink_to(os.path.relpath(source, link.parent))
 
         renamed = Path(directory) / "renamed-knowledge-base"
         import shutil

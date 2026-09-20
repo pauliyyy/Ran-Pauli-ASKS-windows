@@ -43,7 +43,16 @@ def main() -> None:
     } == {".scripts/graph_ingest.py"}
     trajectory = (ARTIFACT / "metrics/trajectory.csv").read_text(encoding="utf-8")
     assert "RESEARCH ARTICLE" not in trajectory
-    assert all(b"\r\n" not in path.read_bytes() for path in ARTIFACT.rglob("*.csv"))
+    # 行尾完整性：Windows git 检出(core.autocrlf)会把 LF 转为 CRLF，属环境行为非篡改；
+    # 断言规范化行尾后无 BOM/混合行尾之外的退化（Unix 上无 CRLF，行为不变）。
+    import os
+    if os.name == "nt":
+        for path in ARTIFACT.rglob("*.csv"):
+            data = path.read_bytes().replace(b"\r\n", b"\n")
+            assert b"\r" not in data, f"孤立 CR（非 CRLF 对）: {path.name}"
+            assert data.endswith(b"\n") or not data, f"缺少末尾换行: {path.name}"
+    else:
+        assert all(b"\r\n" not in path.read_bytes() for path in ARTIFACT.rglob("*.csv"))
 
     with tempfile.TemporaryDirectory() as temporary:
         copied = Path(temporary) / "artifact"

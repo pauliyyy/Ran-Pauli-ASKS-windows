@@ -37,6 +37,7 @@ GRAPH_SCRIPT_FILES = {
     "source_locator.py",
     "sync_keyword_aliases.py",
     "wiki_locator.py",
+    "win_compat.py",  # Windows 兼容层（Unix 上为透传，无行为变化）
 }
 
 

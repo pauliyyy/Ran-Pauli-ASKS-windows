@@ -476,8 +476,12 @@ def extract_docling(paper_dir: Path, paper_id: str) -> Optional[str]:
     if not pdf_path.exists():
         return None
     
-    # 检查 Docling 虚拟环境
-    docling_python = DOCLING_VENV / "bin" / "python"
+    # 检查 Docling 虚拟环境（Windows venv 布局为 Scripts/python.exe，Unix 为 bin/python）
+    try:
+        from win_compat import venv_python
+    except ImportError:
+        venv_python = lambda root: os.path.join(str(root), "bin", "python")
+    docling_python = Path(venv_python(DOCLING_VENV))
     if not docling_python.exists():
         logger.warning("  ⚠️ Docling 虚拟环境不存在，跳过")
         return None

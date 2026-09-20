@@ -22,6 +22,7 @@ import graph_lib as gl
 import node_semantics as ns
 import hub_semantics as hs
 import query_graph as qg
+from win_compat import PY  # Windows 用 sys.executable，Unix 保持 "python3"
 
 try:
     import tiktoken
@@ -48,7 +49,7 @@ def read_section(page: str, section: str = "") -> tuple[str, int]:
 def graph_query(command: str, args: list[str]) -> tuple[str, int]:
     """执行只读图查询；图结果纳入统一编排轨迹和 token 计量。"""
     db_script = _SCRIPTS / "query_graph.py"
-    r = subprocess.run(["python3", str(db_script), command, *args, "--json"],
+    r = subprocess.run([PY, str(db_script), command, *args, "--json"],
                        capture_output=True, text=True, cwd=_REPO)
     text = r.stdout.strip() or r.stderr.strip()
     return text, _tok(text)

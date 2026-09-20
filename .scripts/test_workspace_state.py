@@ -43,8 +43,12 @@ def test_init_imports_existing_status_and_rebuilds_projections():
         assert state.STATUS_MARKER in (project / "notes" / "status.md").read_text(encoding="utf-8")
         memories = state.load_memories(project)
         assert len(memories) == 1 and "关键历史" in memories[0][1]
-        with sqlite3.connect(project / ".workspace" / "index.sqlite") as conn:
+        # Windows: 显式关闭 sqlite 连接，否则句柄悬挂导致 TemporaryDirectory 清理失败。
+        conn = sqlite3.connect(project / ".workspace" / "index.sqlite")
+        try:
             assert conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
+        finally:
+            conn.close()
         assert state.doctor("demo")["ok"] is True
 
 

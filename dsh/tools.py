@@ -16,11 +16,12 @@ SCRIPTS = REPO / ".scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from dsh.harness import ToolDefinition, ToolExecutionResult
+from win_compat import PY  # Windows 用 sys.executable，Unix 保持 "python3"
 
 
 def _wg_call(action: str, args: list[str]) -> str:
     """调用 wg.py，返回解析后的 content 或 error 文本。"""
-    cmd = ["python3", str(SCRIPTS / "wg.py"), action, *args]
+    cmd = [PY, str(SCRIPTS / "wg.py"), action, *args]
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     if p.returncode != 0:
         return f"[ERROR wg.py 返回码 {p.returncode}: {p.stderr[:200]}]"

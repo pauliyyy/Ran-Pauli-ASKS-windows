@@ -1661,7 +1661,7 @@ def ensure_raw_support_edge(conn, page_path, fm=None):
         source_target = gl.REPO / qualified_source_file
         if source_target.parent.is_dir():
             aliases.extend(
-                str(candidate.relative_to(gl.REPO))
+                candidate.relative_to(gl.REPO).as_posix()
                 for candidate in source_target.parent.glob(f"{source_target.stem}.*")
                 if candidate.is_file()
             )

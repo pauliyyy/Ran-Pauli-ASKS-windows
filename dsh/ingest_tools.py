@@ -22,6 +22,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 from dsh.harness import ToolDefinition
 import inbox_state
+from win_compat import PY  # Windows 用 sys.executable，Unix 保持 "python3"
 
 
 _ERROR_CATEGORIES = {
@@ -139,7 +140,7 @@ def _classify_error(returncode: int, stderr: str, stdout: str) -> str:
 
 def _ingest_call(args: list[str], timeout: int = 1800) -> str:
     """调用底层摄入脚本，返回 stdout+stderr 的合并文本。"""
-    cmd = ["python3", str(SCRIPTS / args[0]), *args[1:]]
+    cmd = [PY, str(SCRIPTS / args[0]), *args[1:]]
     p = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, timeout=timeout)
     out = p.stdout or ""
     err = p.stderr or ""

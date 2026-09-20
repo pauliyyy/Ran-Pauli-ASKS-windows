@@ -137,6 +137,10 @@ nodes:
     path: .scripts/recovery_policy.py
     kind: contract
     role: versioned-typed-recovery-budgets-shared-by-llm-ingest-pipeline-and-specialist-escalation
+  win_compat:
+    path: .scripts/win_compat.py
+    kind: implementation
+    role: cross-platform-launcher-lock-and-timeout-shim-preserving-unix-behavior-on-macos-linux
   llm_model_catalog:
     path: operations/config/llm-models.yaml
     kind: config

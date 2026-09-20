@@ -45,6 +45,8 @@ cross-domain/embeddings.db-shm
 # Knowledge content and local runtime artifacts
 # This public template keeps only explicit synthetic examples.
 projects/**
+!projects/_templates/
+!projects/_templates/**
 **/raw/**
 !**/raw/.gitkeep
 **/wiki/**
@@ -55,10 +57,14 @@ cross-domain/topics/**
 !cross-domain/topics/.gitkeep
 **/graph.db
 **/graph.db-*
+# 源指纹库是摄入运行时产物(测试运行后残留),不入库
+cross-domain/source-fingerprints.db
 inbox/**
 !inbox/.gitkeep
 memory/**
 !memory/.gitkeep
+!memory/playbooks/
+!memory/playbooks/index.md
 temp/**
 !temp/.gitkeep
 

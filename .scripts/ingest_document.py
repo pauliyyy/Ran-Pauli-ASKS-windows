@@ -39,6 +39,7 @@ import source_fingerprints as sf
 from derivation_state import sha256_file
 from ingest_common import (progress, parse_delimited, set_progress_file,
                            set_progress_log_path)
+from win_compat import PY  # Windows 用 sys.executable，Unix 保持 "python3"
 import yaml
 from ingest_check import (STATUS_ENUM_BY_DOMAIN, STATUS_ENUM_ALL, valid_partial_date)
 
@@ -271,7 +272,7 @@ def extract_doc_text(source_path: Path, extract_dir: Path | None = None) -> str:
         paper_id = "extern"
         # 默认用 mineru；失败时检测是否扫描件，降级到 blsc_ocr（LLM 视觉模型 OCR）
         result = subprocess.run(
-            ["python3", str(REPO / ".scripts/extractor.py"),
+            [PY, str(REPO / ".scripts/extractor.py"),
              "--paper", paper_id,
              "--external-pdf", str(source_path),
              "--papers-dir", str(extract_dir)],
@@ -284,7 +285,7 @@ def extract_doc_text(source_path: Path, extract_dir: Path | None = None) -> str:
         if _is_scanned_pdf(source_path):
             # 降级到 blsc_ocr（LLM 视觉模型逐页 OCR）
             subprocess.run(
-                ["python3", str(REPO / ".scripts/extractor.py"),
+                [PY, str(REPO / ".scripts/extractor.py"),
                  "--paper", paper_id,
                  "--external-pdf", str(source_path),
                  "--papers-dir", str(extract_dir),
@@ -583,15 +584,30 @@ def normalize_document_wiki(markdown: str, *, correct_sources: str,
 def backup_sqlite_database(source: Path, snapshot: Path) -> None:
     """Create a transaction-local, consistent SQLite snapshot."""
     snapshot.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(f"file:{source}?mode=ro", uri=True) as src, sqlite3.connect(snapshot) as dst:
-        src.backup(dst)
+    # Windows: with-connect 只管事务不关句柄，显式 close 防止文件被占用。
+    src = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+    try:
+        dst = sqlite3.connect(snapshot)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
 
 
 def restore_sqlite_database(snapshot: Path, destination: Path) -> None:
     """Restore an exact SQLite snapshot after a failed graph transaction."""
-    with sqlite3.connect(f"file:{snapshot}?mode=ro", uri=True) as src, sqlite3.connect(destination) as dst:
-        src.backup(dst)
-        dst.commit()
+    src = sqlite3.connect(f"file:{snapshot}?mode=ro", uri=True)
+    try:
+        dst = sqlite3.connect(destination)
+        try:
+            src.backup(dst)
+            dst.commit()
+        finally:
+            dst.close()
+    finally:
+        src.close()
 
 
 def ensure_graph_snapshot(state: dict) -> None:
@@ -666,7 +682,8 @@ def step_dedup_check(state: dict) -> tuple[bool, str]:
             continue
         if candidate.stat().st_size != source_size or sha256_file(candidate) != source_hash:
             continue
-        raw_path = str(candidate.resolve().relative_to(REPO.resolve()))
+        # 统一正斜杠（Unix 上 as_posix() 与 str() 等价，行为不变）。
+        raw_path = candidate.resolve().relative_to(REPO.resolve()).as_posix()
         state["dedup_result"] = [{"path": raw_path, "binary_sha256": source_hash}]
         return True, f"已摄入(SHA-256): {raw_path}"
     return False, ""
@@ -684,7 +701,8 @@ def _select_document_raw_dir(state: dict, base_dir: str) -> str:
         while destination.exists() or destination.is_symlink():
             destination = REPO / base_dir / f"{state['admin_id']}-{suffix}"
             suffix += 1
-    selected = str(destination.relative_to(REPO))
+    # 统一正斜杠（Unix 上 as_posix() 与 str() 等价，行为不变）。
+    selected = destination.relative_to(REPO).as_posix()
     state["raw_allocation"] = {
         "base_dir": base_dir, "document_id": state["admin_id"], "raw_dir": selected,
     }
@@ -920,6 +938,8 @@ def _document_source_context(source_path: Path, receipt: dict | None = None,
 
 def step_preprocess(state: dict) -> tuple[bool, str]:
     """提取全文，并为 prompt 使用的行号准备可逐行定位的 raw 文件。"""
+    # 统一仓库相对路径的正斜杠表示（Unix 上无变化；Windows 修正反斜杠）。
+    state["source"] = str(state.get("source") or "").replace("\\", "/")
     extract_dir = REPO / state["extract_dir"]
     extract_dir.mkdir(parents=True, exist_ok=True)
     source_path = REPO / state["source"]
@@ -936,7 +956,8 @@ def step_preprocess(state: dict) -> tuple[bool, str]:
         doc_text = extract_doc_text(source_path, extract_dir)
     if not doc_text.strip():
         return False, "文档提取失败（空文本）"
-    (extract_dir / "doc.md").write_text(doc_text, encoding="utf-8")
+    # 行尾固定 LF：companion 的字节必须与 receipt 的 text_sha256 一致（Windows 默认会翻译 CRLF）。
+    (extract_dir / "doc.md").write_text(doc_text, encoding="utf-8", newline="\n")
     source_kind = str(state.get("source_kind") or "").strip()
     if source_kind not in SOURCE_KINDS:
         source_kind = detect_document_source_kind(state["source_filename"], doc_text)
@@ -951,7 +972,7 @@ def step_preprocess(state: dict) -> tuple[bool, str]:
         companion_name = sl.locator_companion_name(state["source_filename"])
         companion_path = extract_dir / companion_name
         if companion_path.name != "doc.md":
-            companion_path.write_text(doc_text, encoding="utf-8")
+            companion_path.write_text(doc_text, encoding="utf-8", newline="\n")
         state["raw_locator_kind"] = "companion"
         state["locator_source_filename"] = companion_name
     state["date_str"] = extract_admin_date(
@@ -1943,7 +1964,8 @@ def main() -> None:
         state = {
             "transaction_id": txn_id,
             "status": "dedup_check",
-            "source": str(file_path.relative_to(REPO)),
+            # 统一正斜杠（Unix 上 as_posix() 与 str() 等价，行为不变）。
+            "source": file_path.relative_to(REPO).as_posix(),
             "subproject": args.subproject,
             "document_type": args.document_type,
             "source_kind": args.source_kind or "",

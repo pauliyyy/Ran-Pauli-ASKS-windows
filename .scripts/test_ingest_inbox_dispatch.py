@@ -1440,7 +1440,8 @@ def test_initial_maintenance_publication_and_historical_reconciliation(historica
             for transaction_id in ("txn-first", "txn-second"):
                 linked = inbox_state.load(transaction_id)["maintenance"]
                 assert linked["receipt_path"] == receipt_rel
-                assert linked["report_path"] == str(report_path.relative_to(root))
+                # 仓库内相对路径统一正斜杠（Windows 上 str() 会产生反斜杠）。
+                assert linked["report_path"] == report_path.relative_to(root).as_posix()
             for transaction_id in ("txn-first", "txn-second"):
                 page = f"academic/wiki/papers/{transaction_id}"
                 result = {

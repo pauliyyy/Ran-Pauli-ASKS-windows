@@ -688,7 +688,8 @@ def test_document_dedup_requires_content_identity_including_nested_raw():
             nested.parent.mkdir()
             stored.rename(nested)
             assert module.step_dedup_check(state)[0] is True
-            assert state["dedup_result"][0]["path"] == str(nested.relative_to(repo))
+            # as_posix(): Windows 上 relative_to 产生反斜杠，统一按正斜杠比较。
+            assert state["dedup_result"][0]["path"] == nested.relative_to(repo).as_posix()
             assert state["dedup_result"][0]["binary_sha256"] == module.sha256_file(source)
 
 
@@ -997,16 +998,28 @@ def test_sqlite_snapshot_restores_exact_graph_state():
         root = Path(directory)
         graph = root / "graph.db"
         snapshot = root / "before.db"
-        with sqlite3.connect(graph) as conn:
+        # Windows: with-connect 的 __exit__ 只 commit 不 close；显式 commit+close。
+        conn = sqlite3.connect(graph)
+        try:
             conn.execute("CREATE TABLE nodes(path TEXT PRIMARY KEY)")
             conn.execute("INSERT INTO nodes VALUES ('before')")
+            conn.commit()
+        finally:
+            conn.close()
         module.backup_sqlite_database(graph, snapshot)
-        with sqlite3.connect(graph) as conn:
+        conn = sqlite3.connect(graph)
+        try:
             conn.execute("DELETE FROM nodes")
             conn.execute("INSERT INTO nodes VALUES ('after')")
+            conn.commit()
+        finally:
+            conn.close()
         module.restore_sqlite_database(snapshot, graph)
-        with sqlite3.connect(graph) as conn:
+        conn = sqlite3.connect(graph)
+        try:
             values = [row[0] for row in conn.execute("SELECT path FROM nodes")]
+        finally:
+            conn.close()
         assert values == ["before"]
 
 
@@ -1020,6 +1033,8 @@ def test_rollback_removes_manifest_companion_restores_graph_and_marks_receipt():
     graph = root / "graph.db"
     snapshot = extract / "graph-before.sqlite"
     receipt = root / "receipt.json"
+    # 清理上次失败可能残留的半成品（Windows 上无法覆盖被占用文件）。
+    shutil.rmtree(root, ignore_errors=True)
     extract.mkdir(parents=True, exist_ok=True)
     raw_dir.mkdir(parents=True, exist_ok=True)
     wiki.parent.mkdir(parents=True, exist_ok=True)
@@ -1029,13 +1044,22 @@ def test_rollback_removes_manifest_companion_restores_graph_and_marks_receipt():
     (extract / "manifest.json").write_text(json.dumps({
         "raw_files": ["policy.docx", "policy.md"], "wiki_file": "wiki.md"
     }), encoding="utf-8")
-    with sqlite3.connect(graph) as conn:
+    # Windows: with-connect 的 __exit__ 只 commit 不 close；显式 commit+close。
+    conn = sqlite3.connect(graph)
+    try:
         conn.execute("CREATE TABLE nodes(path TEXT PRIMARY KEY)")
         conn.execute("INSERT INTO nodes VALUES ('before')")
+        conn.commit()
+    finally:
+        conn.close()
     module.backup_sqlite_database(graph, snapshot)
-    with sqlite3.connect(graph) as conn:
+    conn = sqlite3.connect(graph)
+    try:
         conn.execute("DELETE FROM nodes")
         conn.execute("INSERT INTO nodes VALUES ('after')")
+        conn.commit()
+    finally:
+        conn.close()
     receipt.write_text(json.dumps({"status": "committed"}), encoding="utf-8")
     state = {
         "wiki_path": str(wiki.with_suffix("").relative_to(module.REPO)),
@@ -1054,8 +1078,11 @@ def test_rollback_removes_manifest_companion_restores_graph_and_marks_receipt():
         assert not wiki.exists()
         assert not (raw_dir / "policy.docx").exists()
         assert not (raw_dir / "policy.md").exists()
-        with sqlite3.connect(graph) as conn:
+        conn = sqlite3.connect(graph)
+        try:
             assert [row[0] for row in conn.execute("SELECT path FROM nodes")] == ["before"]
+        finally:
+            conn.close()
         assert json.loads(receipt.read_text(encoding="utf-8"))["status"] == "rolled_back"
         assert any("policy.md" in item for item in rolled)
     finally:

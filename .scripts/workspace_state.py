@@ -682,7 +682,10 @@ def rebuild_index(root: Path) -> dict:
     fd, temporary = tempfile.mkstemp(prefix=".index.", suffix=".sqlite", dir=directory)
     os.close(fd)
     try:
-        with sqlite3.connect(temporary) as conn:
+        # Windows: sqlite3 的 with 块只管事务(提交/回滚)，不关闭连接；必须显式
+        # close 后才能 os.replace（Unix 允许替换被打开的文件，Windows 不允许）。
+        conn = sqlite3.connect(temporary)
+        try:
             conn.executescript("""
                 PRAGMA journal_mode=DELETE;
                 CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -710,6 +713,8 @@ def rebuild_index(root: Path) -> dict:
             conn.executemany("INSERT INTO memories VALUES (?,?,?,?,?,?,?,?,?,?)",
                              [_record_row(*record, root) for record in memories])
             conn.commit()
+        finally:
+            conn.close()
         os.replace(temporary, directory / "index.sqlite")
     except Exception:
         try:
@@ -1218,10 +1223,15 @@ def doctor(value: str | Path) -> dict:
         warnings.append("缺少 index.sqlite；运行 rebuild")
     else:
         try:
-            with sqlite3.connect(f"file:{index}?mode=ro", uri=True) as conn:
+            # Windows: sqlite3 的 with 块只管事务，不关闭连接；显式 close，
+            # 否则文件句柄悬挂导致后续清理/替换失败（Unix 上无影响）。
+            conn = sqlite3.connect(f"file:{index}?mode=ro", uri=True)
+            try:
                 check = conn.execute("PRAGMA quick_check").fetchone()[0]
                 indexed_items = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
                 indexed_memories = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+            finally:
+                conn.close()
             if check != "ok":
                 errors.append(f"index.sqlite quick_check: {check}")
             if indexed_items != len(items) or indexed_memories != len(memories):

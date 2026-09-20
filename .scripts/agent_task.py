@@ -67,7 +67,10 @@ def resolve_temp_artifact(repo: Path, value: str | Path, namespace: str, *,
 
 
 def _relative_path(value: str) -> str:
-    path = PurePosixPath(str(value or ""))
+    # Windows 上 str(relative_to(...)) 产生反斜杠；统一规范化为正斜杠
+    #（Unix 上是无操作，行为不变）。
+    value = str(value or "").replace("\\", "/")
+    path = PurePosixPath(value)
     if not value or path.is_absolute() or ".." in path.parts:
         raise ValueError(f"agent task path 必须是仓库内相对路径: {value!r}")
     return path.as_posix()

@@ -1,0 +1,37 @@
+# 跨平台行尾统一策略（2026-09-20 Windows 适配）
+# 仓库内所有文本以 LF 存储；Windows 检出不转换（与 macOS/Linux 一致）。
+# 代码中大量 sha256/receipt 逻辑对字节敏感，CRLF 会破坏校验和一致性。
+* text=auto eol=lf
+
+# Windows 专属脚本保持 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制文件不做任何转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.gz binary
+*.zip binary
+*.db binary
+*.sqlite binary
+*.pptx binary
+*.xlsx binary
+*.docx binary
+*.wav binary
+*.mp3 binary
+*.mp4 binary
+
+# 图谱与产物类
+*.csv binary
+*.jsonl binary
+*.jsonl.gz binary
+*.pkl binary
+*.npz binary
+
+# Python 缓存不入库
+__pycache__/ export-ignore

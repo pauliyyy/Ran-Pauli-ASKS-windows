@@ -587,8 +587,9 @@ def record_paper_route_correction(transaction_id: str, result: dict) -> str:
         for item in closed_report.get("files", [])
     ):
         result["maintenance"] = state["maintenance"]
-        return str(state_path.relative_to(REPO))
-    return str(inbox_state.save(transaction_id, state).relative_to(REPO))
+        # 统一正斜杠（Unix 上 as_posix() 与 str() 等价，行为不变）。
+        return state_path.relative_to(REPO).as_posix()
+    return inbox_state.save(transaction_id, state).relative_to(REPO).as_posix()
 
 
 def _read_json(path: Path):
@@ -726,9 +727,11 @@ def read_people_profile(path: str | Path) -> NodeProfile | None:
         return None
     target = _page_file(path)
     try:
-        rel = str(target.resolve().relative_to(REPO.resolve())).removesuffix(".md")
+        rel = target.resolve().relative_to(REPO.resolve()).as_posix()
     except ValueError:
         return None
+    if rel.endswith(".md"):
+        rel = rel[: -len(".md")]
     return NodeProfile(rel, "people", text, f"{rel}#{section.slug}")
 
 

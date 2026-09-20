@@ -65,11 +65,13 @@ def atomic_write(path, content):
         if path.exists():
             shutil.copymode(path, temporary)
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        # Windows 不支持以 O_RDONLY 打开目录做 fsync；Unix 保留目录落盘保证。
+        if os.name != "nt":
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -94,7 +96,9 @@ def check_references(root, prefixes, declared):
     result = subprocess.run(command + ["--"] + roots, cwd=root, capture_output=True, text=True)
     if result.returncode not in (0, 1):
         raise ValueError(f"reference discovery failed: {result.stderr}")
-    extra = set(result.stdout.splitlines()) - set(declared)
+    # Windows: rg 输出反斜杠路径与 CRLF 行尾，统一规范化为正斜杠再比对。
+    discovered = {line.strip().replace("\\", "/") for line in result.stdout.splitlines() if line.strip()}
+    extra = discovered - set(declared)
     if extra:
         raise ValueError(f"undeclared references require review: {sorted(extra)}")
 
@@ -113,7 +117,7 @@ def prepare(root, manifest):
         if str(source) in mapping:
             raise ValueError("duplicate source in manifest")
         for suffix, field in ((".pdf", "sha256"), (".md", "companion_sha256")):
-            old, new = str(source.with_suffix(suffix)), str(destination.with_suffix(suffix))
+            old, new = source.with_suffix(suffix).as_posix(), destination.with_suffix(suffix).as_posix()
             source_path, target_path = local_path(root, old), local_path(root, new)
             require_hash(source_path, item[field])
             if target_path.exists():
@@ -122,7 +126,7 @@ def prepare(root, manifest):
                 raise ValueError(f"destination directory must already exist: {new}")
             files.append({"source": old, "destination": new, "sha256": item[field]})
             mapping[old] = new
-        old_node, new_node = str(source.with_suffix("")), str(destination.with_suffix(""))
+        old_node, new_node = source.with_suffix("").as_posix(), destination.with_suffix("").as_posix()
         mapping[old_node] = new_node
         wiki = item["wiki"]
         if not wiki.startswith("academic/wiki/") or not wiki.endswith(".md"):
@@ -130,7 +134,7 @@ def prepare(root, manifest):
         wiki_path = local_path(root, wiki)
         require_hash(wiki_path, item["wiki_sha256"])
         content = wiki_path.read_text(encoding="utf-8")
-        if str(source.with_suffix(".md")) not in content:
+        if source.with_suffix(".md").as_posix() not in content:
             raise ValueError(f"wiki does not cite this source: {wiki}")
         references[wiki] = content
     if len({item["destination"] for item in files}) != len(files):
@@ -304,7 +308,8 @@ def relocate(root, manifest=None, apply=False, resume=None):
                     staged = directory / f"raw-{number}.bin"
                     shutil.copy2(source, staged)
                     require_hash(staged, item["sha256"])
-                    with staged.open("rb") as handle:
+                    # fsync 落盘保证；r+b 句柄两平台均可 fsync（只读句柄在 Windows 报 Errno 9）。
+                    with staged.open("r+b") as handle:
                         os.fsync(handle.fileno())
                     os.link(staged, target)
                     staged.unlink()

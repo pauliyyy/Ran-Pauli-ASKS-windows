@@ -16,8 +16,34 @@ for i,a in enumerate(sys.argv):
         encoding_name = sys.argv[i+1]
 enc = tiktoken.get_encoding(encoding_name)
 SCRIPTS = os.path.join(os.path.dirname(__file__))
+sys.path.insert(0, SCRIPTS)
+from win_compat import PY  # Windows 用 sys.executable，Unix 保持 "python3"
 
 def read_section(file, section):
+    # 跨平台：优先复用 wg.py 的 Python 版 read-section（Unix 上行为与
+    # read_section.sh 一致——同一段截取、非零退出返回空），仅当 wg.py 不可用时
+    # 回退 bash 脚本（Unix 原路径）。
+    try:
+        r = subprocess.run([PY, os.path.join(SCRIPTS, "wg.py"), "read-section", file, section],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            try:
+                env = json.loads(r.stdout)
+                if env.get("ok") and isinstance(env.get("result"), dict):
+                    body = env["result"].get("text") or ""
+                    citations = env["result"].get("raw_citations") or []
+                    if citations:
+                        body = body + "\n" + "\n".join(
+                            c if isinstance(c, str)
+                            else f"[^{c.get('marker','')}] {c.get('raw','')}"
+                            for c in citations)
+                    return body
+                if env.get("ok"):
+                    return str(env.get("result", ""))
+            except json.JSONDecodeError:
+                pass
+    except OSError:
+        pass
     r = subprocess.run(["bash", os.path.join(SCRIPTS,"read_section.sh"), file, section],
                        capture_output=True, text=True)
     return r.stdout if r.returncode == 0 else ""

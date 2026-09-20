@@ -16,12 +16,21 @@ def project_root(value: str | None) -> Path:
     return Path(value).resolve() if value else Path(__file__).resolve().parent.parent
 
 
+def _normalize_link_target(target: str) -> str:
+    # Windows: Path.symlink_to(Path 对象) 会写入 \\?\ 扩展长度路径前缀，
+    # readlink 原样返回导致与普通路径前缀不匹配；剥掉前缀再比较。
+    # Unix 上 readlink 从不带该前缀，此函数为无操作。
+    if target.startswith("\\\\?\\"):
+        return target[4:]
+    return target
+
+
 def internal_absolute_links(root: Path) -> list[tuple[Path, Path, str]]:
     changes: list[tuple[Path, Path, str]] = []
     for link_path in root.rglob("*"):
         if not link_path.is_symlink():
             continue
-        target = os.readlink(link_path)
+        target = _normalize_link_target(os.readlink(link_path))
         if not os.path.isabs(target):
             continue
         target_path = Path(target)

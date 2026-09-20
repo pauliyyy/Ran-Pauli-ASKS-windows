@@ -33,16 +33,17 @@ def workspace():
             destination = Path("academic/raw/works") / category / source.name
             wiki = f"academic/wiki/references/{name}.md"
             page = wiki[:-3]
-            raw = str(source.with_suffix(""))
-            locator = str(source.with_suffix(".md"))
+            raw = source.with_suffix("").as_posix()
+            locator = source.with_suffix(".md").as_posix()
             (root / source).write_bytes(f"binary-{number}".encode())
-            (root / source.with_suffix(".md")).write_text("# Certificate\n\nRegistered.\n", encoding="utf-8")
+            # Windows: write_text 默认翻译 CRLF，导致 fixture 哈希与后续 LF 写入不一致；固定 LF。
+            (root / source.with_suffix(".md")).write_text("# Certificate\n\nRegistered.\n", encoding="utf-8", newline="\n")
             (root / wiki).write_text(
                 f"---\ntitle: Certificate\ntype: academic-reference\nsources: [{locator}]\n"
                 "source_type: official-doc\ndate: 2026-09-10\nstatus: current\n"
                 "confidence: high\ncreated: 2026-09-10\nupdated: 2026-09-10\n---\n"
                 f"## Navigation\nCertificate.\n## Content\nRegistered.[^r3]\n"
-                f"## Sources\n[^r3]: {locator}#L3\n", encoding="utf-8")
+                f"## Sources\n[^r3]: {locator}#L3\n", encoding="utf-8", newline="\n")
             conn.execute("INSERT INTO nodes(path,title,type) VALUES (?,?,?)", (page, "Certificate", "page"))
             conn.execute("INSERT INTO nodes(path,title,type) VALUES (?,?,?)", (raw, name, "raw"))
             conn.execute("INSERT INTO edges(subject,predicate,object,source) VALUES (?,?,?,?)",
@@ -56,7 +57,7 @@ def workspace():
                          (raw, page, locator + "#L3", "Local certificate"))
             fingerprints.register_source(root / source, text_path=root / source.with_suffix(".md"),
                                          db_path=root / "cross-domain/source-fingerprints.db", repo=root)
-            manifest["items"].append({"source": str(source), "destination": str(destination), "wiki": wiki,
+            manifest["items"].append({"source": source.as_posix(), "destination": destination.as_posix(), "wiki": wiki,
                                       "sha256": migration.sha256_file(root / source),
                                       "companion_sha256": migration.sha256_file(root / source.with_suffix(".md")),
                                       "wiki_sha256": migration.sha256_file(root / wiki)})
@@ -75,8 +76,8 @@ def test_preview_and_complete_preserve_hashes_ids_and_lineage():
         assert receipt["warnings"] == []
         conn = gl.connect(root / "cross-domain/graph.db")
         for item in manifest["items"]:
-            old = str(Path(item["source"]).with_suffix(""))
-            new = str(Path(item["destination"]).with_suffix(""))
+            old = Path(item["source"]).with_suffix("").as_posix()
+            new = Path(item["destination"]).with_suffix("").as_posix()
             assert not (root / item["source"]).exists()
             assert migration.sha256_file(root / item["destination"]) == item["sha256"]
             assert migration.sha256_file((root / item["destination"]).with_suffix(".md")) == item["companion_sha256"]

@@ -172,8 +172,8 @@ def prepare_transaction(path: Path | None = None, repo: Path | None = None) -> d
         "agent_task": task,
         "transaction_id": transaction_id,
         "fact_entries": len(facts),
-        "write_to": str(proposal_path.relative_to(repo)),
-        "manifest_path": str(manifest_path.relative_to(repo)),
+        "write_to": proposal_path.relative_to(repo).as_posix(),
+        "manifest_path": manifest_path.relative_to(repo).as_posix(),
         "retryable": False,
         "next_action": "complete_agent_task",
         "apply_command": (
@@ -222,7 +222,8 @@ def _validate_proposal(repo: Path, manifest: dict, proposal: dict) -> tuple[list
         if not isinstance(update, dict):
             raise ValueError("wiki update must be an object")
         target = _managed_wiki_path(repo, update.get("page", ""))
-        relative = str(target.relative_to(repo))
+        # 统一正斜杠（Unix 上 as_posix() 与 str() 等价，行为不变）。
+        relative = target.relative_to(repo).as_posix()
         if relative in pages:
             raise ValueError(f"duplicate wiki update: {relative}")
         pages.add(relative)
