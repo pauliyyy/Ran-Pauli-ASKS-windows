@@ -218,6 +218,10 @@ cp .env.example .env
 python3 .scripts/engineering_graph.py validate
 ```
 
+在 Windows 上请使用 `python`（或 Python 启动器 `py`）代替 `python3`。仓库自带
+`.gitattributes`，无论本地 `core.autocrlf` 如何设置，文本文件都会以 LF 行尾检出，
+克隆后无需任何额外的 git 配置。
+
 只有需要模型的工作流才需要在 `.env` 中配置模型后端。摄入编排由独立的
 `INGEST_BACKEND` 选择；API 摄入还可以通过 `INGEST_GENERATION_*` 和
 `INGEST_PROPOSITION_*` 分别设置生成模型与命题抽取模型，未设置时复用主 LLM。
@@ -234,6 +238,24 @@ python3 .scripts/engineering_graph.py validate
 ```bash
 python3 .scripts/route.py --task query --query-stage start
 ```
+
+## 环境要求
+
+- Python 3.10 或更新版本（`python3 --version` 查看；Windows 上用
+  `python --version`）。
+- Python 依赖：`pip install -r requirements.txt` 安装全部运行依赖
+  （PyYAML、PyMuPDF、python-pptx、tiktoken、numpy、scipy，以及该文件中列出的
+  表格/解析辅助库）。
+- 需要系统 `PATH` 中有 git 和 [ripgrep](https://github.com/BurntSushi/ripgrep)，
+  用于仓库审计检查（`test_open_source_release`、`test_relocate_own_ip`）。
+- Windows 环境说明：
+  - 开启**开发者模式**（设置 → 系统 → 开发者选项），摄入管线才能创建符号链接；
+    符号链接承载 Raw 来源锚定与仓库边界安全检查。
+  - PPT/PPTX 视觉复核与可编辑 PPT 重建需要安装
+    [LibreOffice](https://www.libreoffice.org/)；仅当自动探测失败时才需设置
+    `SOFFICE_BIN` 指向可执行文件。
+  - 受约束智能体循环（`dsh/`）在 Windows 上以软超时替代 `SIGALRM`，
+    工具调用超时语义保持不变。
 
 只把获得处理授权的材料放入 `inbox/`，并由已注册的摄入工作流创建或更新各领域
 内容。不要原地修改已摄入的 Raw 记录。主要任务规范位于 `operations/`。

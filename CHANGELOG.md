@@ -7,6 +7,28 @@ manifests and checksums.
 
 ## [Unreleased]
 
+### Platform compatibility
+
+- Added full Windows compatibility with unchanged functionality: a
+  cross-platform compatibility layer (`.scripts/win_compat.py`) provides the
+  Python launcher, file locking, and soft-timeout primitives; Unix code paths
+  and behavior are unchanged.
+- Normalized repository-relative paths to POSIX separators at the ingestion,
+  graph, and locator boundaries so transactions and locators stay portable;
+  kept byte-exact LF writes for checksum-bound artifacts (OCR companions,
+  PPTX native extraction).
+- Replaced the shell `read_section.sh` dependency in token recomputation with
+  the equivalent Python `wg.py read-section` path; the DSH timeout guard now
+  applies a soft timeout on Windows while preserving tool-timeout semantics.
+- Added a root `.gitattributes` so clones check out consistent LF endings on
+  any platform regardless of local `core.autocrlf`, and a `requirements.txt`
+  listing the runtime Python dependencies.
+- Shipped the synthetic project template and playbook-index fixtures that the
+  regression suite requires but a fresh clone previously lacked.
+- Documented Windows prerequisites (Developer Mode for symlinks, LibreOffice
+  for slide visual review) in both READMEs; all regression suites pass on
+  Windows with these prerequisites in place.
+
 ## [0.6.0] - 2026-09-12
 
 ### Version decision

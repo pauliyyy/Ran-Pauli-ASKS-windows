@@ -315,4 +315,20 @@ Agent 模式由当前宿主持有控制循环，API 模式由程序推进，二�
 
 图片转写与复核使用独立视觉 API 配置，远程上传仍需明确许可；示例配置的 IMAGE_OCR_ALLOW_REMOTE 默认为 false。选择视觉服务不切换 Agent/API 语义 backend，模型复核不冒充人工确认。可编辑 PPT 重建使用独立模型配置，本次默认模型调整不代表已经验证重建质量提升。详细命令和边界以 operations/INBOX.md、operations/INGEST.md 与 operations/IMAGE_OCR.md 为准。
 
+## 2026年9月20日工程更新补充（Windows 平台兼容）
+
+本次为兼容性工程更新，功能语义不变：系统可在 Windows 上完整运行，Unix 行为不变，不改变冻结论文实验和数据产物，也不创建新标签或 Release。版本号在实际发布时按语义规则递增。
+
+### 跨平台基础设施
+
+新增 .scripts/win_compat.py 兼容层：Windows 使用 sys.executable 启动子进程（替代 python3 命令）、msvcrt 文件锁（替代 fcntl）、threading.Timer 软超时（替代 SIGALRM）；Unix 上继续使用原有实现，行为零变化。DSH 工具超时在 Windows 上采用软超时，超时语义保持一致。
+
+### 路径与行尾治理
+
+摄入、图和定位器边界的仓库相对路径统一规范化为 POSIX 正斜杠分隔符，保证事务记录和 Raw 定位器跨平台一致；校验和绑定的产物（OCR companion、PPTX 原生提取文本）固定以 LF 字节写入。仓库根新增 .gitattributes，任何平台克隆、任何 core.autocrlf 设置下文本文件均以 LF 检出，避免行尾差异破坏冻结产物校验。
+
+### 依赖清单与 Windows 前置条件
+
+新增 requirements.txt 列出全部运行依赖（PyYAML、PyMuPDF、python-pptx、tiktoken、numpy、scipy、openpyxl、xlrd 等）。Windows 使用者需在 PATH 中有 git 与 ripgrep；开启开发者模式以创建符号链接（承载 Raw 来源锚定与仓库边界安全检查）；PPT/PPTX 视觉复核链路需要 LibreOffice。相关说明已写入中英文 README 的环境要求章节，全部回归测试在 Windows 上通过。
+
 说明：本文统一使用 ASKS 作为项目名称。ASKS 的英文全称为 Agent-Driven Scientific Knowledge System。本介绍初版日期为2026年9月1日，2026年9月3日修订工程机制说明并对应 Ran-ASKS v0.3.0；2026年9月4日同步至 Ran-ASKS v0.4.0，新增受控漫画生成并更新摄入恢复、会议来源证据和 Hub 路由说明。实验数字来自冻结的56篇论文重建、外部语义与导航审计，以及七组同年内顺序重建记录。arXiv v1（arXiv:2608.29612）对应 Ran-ASKS v0.2.0 与论文数据产物1.0.0。外部语义与导航审计对应 Ran-ASKS v0.2.1 与增量数据产物1.1.0。七组同年内顺序重建属于 arXiv v1 之后的投稿工作结果，尚未纳入上述冻结公开产物。

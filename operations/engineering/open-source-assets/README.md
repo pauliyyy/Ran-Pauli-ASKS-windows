@@ -274,6 +274,11 @@ cp .env.example .env
 python3 .scripts/engineering_graph.py validate
 ```
 
+On Windows, use `python` instead of `python3` (or `py` with the Python
+launcher). The repository ships a `.gitattributes` file so text files check out
+with LF line endings regardless of your local `core.autocrlf` setting; no
+extra git configuration is required after cloning.
+
 Configure model backends in `.env` only for workflows that need them. Ingestion
 orchestration is selected independently with `INGEST_BACKEND`; API ingestion can
 also assign separate generation and proposition models through
@@ -293,6 +298,24 @@ preservation matter.
 ```bash
 python3 .scripts/route.py --task query --query-stage start
 ```
+
+## Requirements
+
+- Python 3.10 or newer (`python3 --version`; on Windows run `python --version`).
+- Python packages: `pip install -r requirements.txt` installs the runtime
+  dependencies (PyYAML, PyMuPDF, python-pptx, tiktoken, numpy, scipy, and the
+  spreadsheet/parsing helpers listed in that file).
+- Git and [ripgrep](https://github.com/BurntSushi/ripgrep) on `PATH` for the
+  repository audit checks (`test_open_source_release`, `test_relocate_own_ip`).
+- Windows specifics:
+  - Enable **Developer Mode** (Settings → System → For developers) so the
+    ingestion pipeline can create symlinks, which anchor Raw provenance and
+    repository-boundary security checks.
+  - Install [LibreOffice](https://www.libreoffice.org/) for the PPT/PPTX
+    visual-review and editable-PPT reconstruction workflows; set `SOFFICE_BIN`
+    only if the executable is not auto-discovered.
+  - The guarded agent loop (`dsh/`) uses a soft timeout on Windows instead of
+    `SIGALRM`; tool-call timeout semantics are preserved.
 
 Place only material you are authorized to process in `inbox/` and let the
 registered ingestion workflow create or update domain content. Do not edit an

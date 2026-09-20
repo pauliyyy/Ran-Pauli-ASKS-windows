@@ -37,6 +37,15 @@ configuration. These are compatible ingestion extensions and fixes, not a new
 paper experiment or artifact. Both the Markdown and appended PDF pages contain
 the same addendum; previously reviewed PDF pages are retained.
 
+The 2026-09-20 engineering update adds full Windows platform compatibility
+with unchanged functionality: cross-platform process launching, file locking,
+and timeout primitives; POSIX-normalized repository-relative paths for portable
+transactions and locators; LF-guaranteed checkouts through a root
+`.gitattributes`; a `requirements.txt` for runtime dependencies; and
+documented Windows prerequisites (Developer Mode for symlinks, LibreOffice for
+slide visual review). Unix behavior is unchanged and no frozen paper artifact
+is affected. The version increment is assigned when this update is published.
+
 | Content described in the introduction | Ran-ASKS boundary | Paper artifact | Status |
 | --- | --- | --- | --- |
 | Core method and 56-paper chronological demonstration | `v0.2.0` | `1.0.0` | Frozen arXiv v1 boundary for arXiv:2608.29612 |
@@ -74,6 +83,13 @@ Markdown 增加带日期的工程补充；PDF 保留之前已审阅的版式，�
 提取与宿主逐页复核、基于证据的来源日期、会议最终来源绑定和独立视觉服务配置。
 这些是兼容的摄入扩展与修复，不是新的论文实验或数据产物。Markdown 与 PDF 新增页
 使用同一补充内容，PDF 先前已审阅的页面予以保留。
+
+2026年9月20日的工程更新补充完整 Windows 平台兼容（功能不变）：跨平台进程启动、
+文件锁与超时原语；仓库相对路径统一为 POSIX 分隔符，保证事务与定位器可移植；
+根 `.gitattributes` 保证 LF 行尾检出；新增 `requirements.txt` 运行依赖清单；并在
+README 中说明 Windows 前置条件（符号链接需开发者模式、幻灯片视觉复核需
+LibreOffice）。Unix 行为不变，不影响任何冻结论文数据产物。版本号在本次更新
+实际发布时确定。
 
 | 中文说明涉及的内容 | Ran-ASKS 边界 | 论文数据产物 | 状态 |
 | --- | --- | --- | --- |

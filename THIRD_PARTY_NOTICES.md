@@ -29,6 +29,15 @@ The relationship labels mean:
 | [PyMuPDF](https://github.com/pymupdf/PyMuPDF) | Runtime dependency for PDF and visual workflows | PDF text-layer access, page rendering, metadata extraction, and vector-object inspection in ingestion, visual QA, and editable-PPT reconstruction. The package is not vendored here. | AGPL-3.0 or a separate commercial license from its vendor |
 | [python-pptx](https://github.com/scanny/python-pptx) | Runtime dependency for slide workflows | Creation of native PowerPoint text boxes, lines, shapes, freeforms, and related Open XML objects. | MIT |
 | [PyYAML](https://github.com/yaml/pyyaml) | Runtime dependency | Parsing the YAML schemas, configuration, and engineering graph. | MIT |
+| [numpy](https://github.com/numpy/numpy) | Runtime dependency for embedding and clustering helpers | Vector math behind keyword clustering, direction matching, and embedding caches. | BSD-3-Clause |
+| [scipy](https://github.com/scipy/scipy) | Runtime dependency for keyword clustering | Hierarchical clustering utilities used by keyword-cluster maintenance. | BSD-3-Clause |
+| [tiktoken](https://github.com/openai/tiktoken) | Runtime dependency for token accounting | Token estimation for prompt budgets and wiki-page token recomputation. | MIT |
+| [openpyxl](https://openpyxl.readthedocs.io/) | Runtime dependency for spreadsheet ingestion | Reading and writing `.xlsx` workbooks during document ingestion. | MIT |
+| [xlrd](https://github.com/python-excel/xlrd) | Runtime dependency for legacy spreadsheet ingestion | Reading legacy `.xls` workbooks (formatting-aware) during document ingestion. | BSD-3-Clause |
+| [rank-bm25](https://github.com/dorianbrown/rank-bm25) | Runtime dependency for retrieval baselines | BM25 scoring in the baseline retrieval comparison scripts. | Apache-2.0 |
+| [Pillow](https://github.com/python-pillow/Pillow) | Runtime dependency for image workflows | Image decoding and pixel access in editable-PPT visual reconstruction. | HPND (MIT-CMU variant) |
+| [ripgrep](https://github.com/BurntSushi/ripgrep) | External tool required by repository audits | Content search in the self-owned-IP relocation reference scan (`relocate_own_ip`). | MIT OR Unlicense |
+| [LibreOffice](https://www.libreoffice.org/) | Optional external renderer | Slide rendering for visual QA and editable-PPT reconstruction on the local machine. | MPL-2.0 |
 | [SQLite](https://www.sqlite.org/) | Standard-library storage backend | The Python `sqlite3` interface provides the single-file graph database used by Ran-ASKS. | Public domain |
 
 ## Related projects not integrated
