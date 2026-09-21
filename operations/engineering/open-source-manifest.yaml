@@ -5,6 +5,8 @@ include:
   - AGENTS.md
   - .env.example
   - .gitignore
+  - requirements.txt
+  - requirements-docling.txt
   - preprocess.py
   - .scripts/**
   - .codex/skills/manuscript-diagnosis/SKILL.md

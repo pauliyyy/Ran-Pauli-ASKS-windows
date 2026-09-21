@@ -1,0 +1,17 @@
+# Python 3.10+ shared runtime and regression dependencies.
+PyYAML>=6.0
+numpy>=1.23
+scipy>=1.10
+matplotlib>=3.7
+networkx>=3.0
+rank-bm25>=0.2.2
+tiktoken>=0.5
+requests>=2.28
+python-dotenv>=1.0
+PyMuPDF>=1.22
+Pillow>=9.4
+python-pptx>=0.6.21
+openpyxl>=3.1
+xlrd>=2.0
+xlwt>=1.3
+

@@ -270,9 +270,20 @@ not trigger it automatically. See `operations/VISUAL_QA.md` and
 ```bash
 git clone https://github.com/ranshiju/Ran-ASKS.git
 cd Ran-ASKS
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install --upgrade pip
+python3 -m pip install -r requirements.txt
+python3 .scripts/ubuntu_preflight.py --python-only --strict
 cp .env.example .env
 python3 .scripts/engineering_graph.py validate
 ```
+
+The supported Ubuntu baseline is 22.04 or later with Python 3.10+. Install the
+system packages required for document conversion, slide rendering, OCR,
+desktop opening, and recoverable trash handling by following the
+[Ubuntu setup and validation guide](operations/UBUNTU.md). The same guide
+documents headless-server behavior and the isolated optional Docling backend.
 
 Configure model backends in `.env` only for workflows that need them. Ingestion
 orchestration is selected independently with `INGEST_BACKEND`; API ingestion can
@@ -305,6 +316,8 @@ ingested Raw record in place. The main task specifications live under
 | --- | --- |
 | `AGENTS.md` | Project constitution, task routing, and non-negotiable boundaries |
 | `operations/` | Ingestion, query, research, writing, synchronization, and engineering contracts |
+| `operations/UBUNTU.md` | Ubuntu 22.04+ installation, system-tool mapping, and validation |
+| `requirements.txt` | Shared Python runtime and regression dependencies |
 | `.scripts/` | Validated command-line tools and regression checks |
 | `dsh/` | Optional guarded agent loop and tool registry |
 | `academic/`, `admin/`, `teaching/`, `business/` | Independent domain templates |

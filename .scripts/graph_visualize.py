@@ -22,6 +22,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / ".scripts"))
 import graph_lib as gl
+import platform_compat
 
 SIMILAR_PRED = "相似"
 TYPE_COLOR = {
@@ -379,9 +380,8 @@ def main():
 
     conn.close()
 
-    if args.open:
-        import subprocess
-        subprocess.run(["open", args.output], check=False)
+    if args.open and not platform_compat.open_with_default_app(args.output):
+        print(f"无法调用桌面程序打开输出，请手动打开: {args.output}", file=sys.stderr)
 
 
 if __name__ == "__main__":

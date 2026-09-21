@@ -31,9 +31,11 @@ import sys
 import urllib.parse
 import unicodedata
 import uuid
+import zipfile
 import inbox_source_policy
 from datetime import datetime
 from pathlib import Path
+from xml.etree import ElementTree
 
 ACADEMIC_EDITORIAL_MARKERS = (
     "专题导言", "特邀编辑", "本期专题", "编者按", "guest editorial", "guest editor",
@@ -84,6 +86,8 @@ import inbox_plan
 import ingest_user_assertions
 import source_fingerprints as sf
 import trash_util
+import document_text
+import pptx_document
 INBOX = REPO / "inbox"
 SKIP_FILES = {".gitkeep", ".DS_Store"}
 
@@ -149,18 +153,19 @@ def read_document_preview(path: Path, max_chars: int = 8000) -> str:
         if suffix in {".txt", ".md"}:
             return path.read_text(encoding="utf-8")[:max_chars]
         if suffix in {".docx", ".doc"}:
-            result = subprocess.run(
-                ["textutil", "-convert", "txt", "-stdout", str(path)],
-                capture_output=True, text=True, timeout=30,
-            )
-            return result.stdout[:max_chars] if result.returncode == 0 else ""
+            return document_text.extract_word_text(path, max_chars=max_chars)
         if suffix == ".pptx":
-            result = subprocess.run(
-                ["pandoc", "-t", "plain", str(path)],
-                capture_output=True, text=True, timeout=30,
-            )
-            return result.stdout[:max_chars] if result.returncode == 0 else ""
-    except (OSError, subprocess.SubprocessError, UnicodeError):
+            text, _manifest = pptx_document.extract(path)
+            return text[:max_chars]
+    except (
+        OSError,
+        subprocess.SubprocessError,
+        UnicodeError,
+        ValueError,
+        KeyError,
+        zipfile.BadZipFile,
+        ElementTree.ParseError,
+    ):
         pass
     return ""
 

@@ -7,6 +7,28 @@ manifests and checksums.
 
 ## [Unreleased]
 
+### Compatibility
+
+- Added an Ubuntu 22.04+ installation contract, explicit Python dependency
+  manifests, and a strict read-only deployment preflight with a real
+  LibreOffice rendering smoke test.
+- Replaced macOS-only Word extraction, desktop opening, recycle-bin, and
+  LibreOffice discovery assumptions with capability-based Ubuntu/macOS
+  adapters while preserving ingestion, validation, and transaction behavior.
+- Verified a real Explorer window from WSL and normalized its path conversion
+  and non-zero success codes so one open request does not trigger duplicate
+  fallback windows.
+- Replaced the ineffective Pandoc PPTX preview call with the existing native
+  OOXML extractor, keeping inbox classification local and dependency-neutral.
+- Ran installed-tool strict preflight and affected regressions on Ubuntu 22.04
+  (Python 3.10, LibreOffice 7.3, Tesseract 4.1) and Ubuntu 26.04 (Python 3.14,
+  LibreOffice 26.2, Tesseract 5.5), including real PPTX rendering, bilingual
+  OCR, legacy DOC extraction, and system trash. The optional CPU-only Docling
+  backend also completed a real PDF-to-Markdown extraction on Ubuntu 26.04;
+  Python 3.12 dependency and regression coverage was verified separately. The
+  public release version is unchanged until a separately authorized release is
+  prepared.
+
 ## [0.6.0] - 2026-09-12
 
 ### Version decision

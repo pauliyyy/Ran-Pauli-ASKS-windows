@@ -91,4 +91,4 @@ prompt-v2 仅将有可见证据且影响阅读、解释或可访问性的缺陷�
 
 ### 本地 PPT 字体与重做核验
 
-打包 macOS LibreOffice 渲染时，shared 入口显式加载随附的 fontconfig 配置以发现系统中文字体；调用方已有 `FONTCONFIG_FILE` / `FONTCONFIG_PATH` 时保留其选择，不安装或改写宿主字体。字体替代仍可能改变换行，须逐页核对。旧渲染缓存不覆盖；摄入核验发现坏渲染时，新建同源事务生成证据，成功后用 `inbox_state.py --supersede <旧事务> --by <完成事务>` 关闭未提交旧事务，保留审计。
+Ubuntu 从 `SOFFICE_BIN`、PATH 和标准安装位置发现 LibreOffice；建议安装 `fonts-noto-cjk`，但 shared 入口不安装或改写宿主字体。打包 macOS/Codex LibreOffice 仍显式加载随附的 fontconfig 配置。两种平台都保留调用方已有的 `FONTCONFIG_FILE` / `FONTCONFIG_PATH`。字体替代仍可能改变换行，须逐页核对。旧渲染缓存不覆盖；摄入核验发现坏渲染时，新建同源事务生成证据，成功后用 `inbox_state.py --supersede <旧事务> --by <完成事务>` 关闭未提交旧事务，保留审计。完整 Ubuntu 安装与验证见 `operations/UBUNTU.md`。

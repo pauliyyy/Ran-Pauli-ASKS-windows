@@ -9,6 +9,8 @@ The relationship labels mean:
 
 - **Runtime dependency**: Ran-ASKS imports or calls the project in the named
   workflow. The dependency is not vendored in this repository unless stated.
+- **Regression dependency**: the project is used to construct or verify test
+  fixtures and is installed by the shared regression environment.
 - **Optional backend**: the project is used only when that backend is explicitly
   configured or selected.
 - **Architectural influence**: Ran-ASKS adopted named design ideas and
@@ -29,6 +31,18 @@ The relationship labels mean:
 | [PyMuPDF](https://github.com/pymupdf/PyMuPDF) | Runtime dependency for PDF and visual workflows | PDF text-layer access, page rendering, metadata extraction, and vector-object inspection in ingestion, visual QA, and editable-PPT reconstruction. The package is not vendored here. | AGPL-3.0 or a separate commercial license from its vendor |
 | [python-pptx](https://github.com/scanny/python-pptx) | Runtime dependency for slide workflows | Creation of native PowerPoint text boxes, lines, shapes, freeforms, and related Open XML objects. | MIT |
 | [PyYAML](https://github.com/yaml/pyyaml) | Runtime dependency | Parsing the YAML schemas, configuration, and engineering graph. | MIT |
+| [NumPy](https://numpy.org/) | Runtime dependency | Embedding math, graph semantics, clustering, and editable-PPT image analysis. | BSD-3-Clause; binary distributions may include separately licensed components |
+| [SciPy](https://scipy.org/) | Runtime dependency | Hierarchical clustering, spatial distances, and image morphology. | BSD-3-Clause; binary distributions may include separately licensed components |
+| [Matplotlib](https://matplotlib.org/) | Runtime dependency | Static graph visualization. | Matplotlib License (PSF-compatible) |
+| [NetworkX](https://networkx.org/) | Runtime dependency | Graph layout and visualization preparation. | BSD-3-Clause |
+| [rank-bm25](https://github.com/dorianbrown/rank_bm25) | Runtime dependency | BM25 baseline navigation and evaluation. | Apache-2.0 |
+| [tiktoken](https://github.com/openai/tiktoken) | Runtime dependency | Token accounting for baseline navigation. | MIT |
+| [Requests](https://requests.readthedocs.io/) | Runtime dependency | HTTP transport for the configured MinerU extraction service. | Apache-2.0 |
+| [python-dotenv](https://github.com/theskumar/python-dotenv) | Runtime dependency | Optional `.env` loading for extraction configuration. | BSD-3-Clause |
+| [Pillow](https://python-pillow.org/) | Runtime dependency | Image normalization, diagnostics, OCR preparation, and editable-PPT reconstruction. | MIT-CMU |
+| [openpyxl](https://openpyxl.readthedocs.io/) | Runtime dependency | Faithful `.xlsx` extraction, including formula and worksheet metadata. | MIT |
+| [xlrd](https://github.com/python-excel/xlrd) | Runtime dependency | Faithful legacy `.xls` extraction. | BSD |
+| [xlwt](https://github.com/python-excel/xlwt) | Regression dependency | Construction of legacy `.xls` extraction fixtures. | BSD |
 | [SQLite](https://www.sqlite.org/) | Standard-library storage backend | The Python `sqlite3` interface provides the single-file graph database used by Ran-ASKS. | Public domain |
 
 ## Related projects not integrated

@@ -41,6 +41,12 @@ OCR 不推测手写签名身份、不填补表单空日期；临时回执不是�
 Wiki 确定性写入 `source_type: ocr`、复核状态与正文限制，不将图片默认视为 official-doc/high。
 复核限制不等于摄入失败：原件空白可核对为 verified，非关键未决项可随 completed 来源保留，不自动要求用户补填；关键项仍按风险闸门阻断。状态和交付用语以 `operations/IMAGE_OCR.md`「状态解释与交付表述」为准。
 
+Word 文档提取由 shared `.scripts/document_text.py` 统一处理：`.docx` 直接按 OOXML
+结构读取 Transitional/Strict 正文、嵌套内容、表格及正文实际引用的页眉页脚、脚注和尾注，不依赖 macOS `textutil`；旧 `.doc` 使用宿主可用的
+`textutil`、LibreOffice、`antiword` 或 `catdoc`。转换器缺失或文件损坏时保留原件并让
+既有预处理/校验明确阻断，不生成空白成功或伪正文。inbox 分类预览与正式摄入复用
+同一适配器，扩展名仍只选择提取器，不改变来源种类判定。
+
 产出:来源摘要页(paper-summary / 政策摘要等),忠于 raw,不做跨文档抽象。
 
 ### 长文动态颗粒度（综述、书籍、长政策）
@@ -638,7 +644,7 @@ LLM 产出的 concept 端点须是**裸名带语义**（可独立指代的实体
 
 **PDF 提取**:调用**内置** `.scripts/extractor.py`(不跳过、不在别处另写兜底——extractor 内部 MinerU 为默认引擎（失败重试3次，退避0/5/15s；认证错误不重试），MinerU 耗尽后不静默回落 docling/pymupdf（论文质量要求），需低优先级引擎须显式 `--engine docling`/`--engine pymupdf`;档位与覆盖规则见 `academic/SCHEMA.md`)。提取后产出的 `paper.md` 存于对应论文目录(`<paper-id>/paper.md`):自己论文 `academic/raw/works/papers/<paper-id>/`(默认),他人论文 `academic/raw/references/<paper-id>/`(传 `--papers-dir`)。sources 字段用相对路径引用。**职责分离**:inbox 来的 PDF 按 `INBOX.md` 新流程,先用 `extractor --external-pdf <inbox路径> --paper <tmp-id> --papers-dir temp/inbox-extract` 在临时区提取为 `paper.md`,单遍阅读撰写 wiki 后由 `inbox_finalize.py` 实体复制落位到最终 `*/raw/<id>/`(不再"先归档再提取")。`--external-pdf` 用于 inbox 摄入的临时区提取;仅 synology:// 远程源等特殊场景另议。
 
-> **分工边界**:`.scripts/extractor.py` 专处理**学术论文 PDF**(MinerU 默认+重试,产出 `<papers-dir>/<paper-id>/`);会议纪要 `.txt` 由 `ingest_meeting.py` 代码驱动摄入;学术非论文及行政/教学/商业文档(`.docx`/`.doc`/`.pptx`/`.txt`/`.pdf`)由 `ingest_document.py` 代码驱动摄入(`--subproject academic|admin|teaching|business`),内部用 textutil/pandoc 提取文本。academic 必须带 `--document-type editorial|academic-reference|conference-summary`，缺失时在事务与预处理前停止。
+> **分工边界**:`.scripts/extractor.py` 专处理**学术论文 PDF**(MinerU 默认+重试,产出 `<papers-dir>/<paper-id>/`);会议纪要 `.txt` 由 `ingest_meeting.py` 代码驱动摄入;学术非论文及行政/教学/商业文档(`.docx`/`.doc`/`.pptx`/`.txt`/`.pdf`)由 `ingest_document.py` 代码驱动摄入(`--subproject academic|admin|teaching|business`),内部用 shared Word/PPTX 提取器、PDF 提取器或 OCR 处理文本。academic 必须带 `--document-type editorial|academic-reference|conference-summary`，缺失时在事务与预处理前停止。
 
 ### raw 被外部调用约束
 

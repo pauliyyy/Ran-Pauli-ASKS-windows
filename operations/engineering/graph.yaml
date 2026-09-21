@@ -9,6 +9,18 @@ nodes:
     path: operations/shared-conventions.md
     kind: spec
     role: build-conventions
+  ubuntu_setup:
+    path: operations/UBUNTU.md
+    kind: spec
+    role: ubuntu-22-and-later-installation-runtime-and-validation-contract
+  python_requirements:
+    path: requirements.txt
+    kind: config
+    role: shared-python-runtime-and-regression-dependency-manifest
+  docling_requirements:
+    path: requirements-docling.txt
+    kind: config
+    role: isolated-optional-docling-backend-dependency-manifest
   ingest:
     path: operations/INGEST.md
     kind: spec
@@ -177,6 +189,22 @@ nodes:
     path: .scripts/test_visual_qa.py
     kind: test
     role: visual-artifact-rendering-remote-guard-and-receipt-resume-regression
+  platform_compat:
+    path: .scripts/platform_compat.py
+    kind: implementation
+    role: shared-platform-command-libreoffice-default-opener-and-recycle-bin-adapter
+  ubuntu_preflight:
+    path: .scripts/ubuntu_preflight.py
+    kind: implementation
+    role: read-only-ubuntu-python-system-tool-language-and-libreoffice-smoke-gate
+  platform_compat_test:
+    path: .scripts/test_platform_compat.py
+    kind: test
+    role: linux-macos-command-resolution-document-text-and-recoverable-trash-regression
+  document_text:
+    path: .scripts/document_text.py
+    kind: implementation
+    role: platform-neutral-docx-and-legacy-doc-text-extraction-adapter
   visual_to_editable_ppt:
     path: .scripts/visual_to_editable_ppt.py
     kind: implementation
@@ -827,6 +855,66 @@ nodes:
     kind: test
     role: symlink-relativize-regression
 edges:
+- - ubuntu_setup
+  - references
+  - python_requirements
+- - ubuntu_setup
+  - references
+  - docling_requirements
+- - ubuntu_setup
+  - specifies
+  - platform_compat
+- - platform_compat
+  - tested_by
+  - platform_compat_test
+- - ubuntu_preflight
+  - uses
+  - platform_compat
+- - ubuntu_preflight
+  - verifies
+  - python_requirements
+- - ubuntu_preflight
+  - verifies
+  - docling_requirements
+- - extractor
+  - uses
+  - docling_requirements
+- - ingest_document
+  - uses
+  - python_requirements
+- - visual_qa
+  - uses
+  - python_requirements
+- - visual_to_editable_ppt
+  - uses
+  - python_requirements
+- - document_text
+  - uses
+  - platform_compat
+- - document_text
+  - tested_by
+  - platform_compat_test
+- - ingest_document
+  - uses
+  - document_text
+- - ingest_inbox
+  - uses
+  - document_text
+- - ingest_inbox
+  - uses
+  - pptx_document
+- - visual_qa
+  - uses
+  - platform_compat
+- - visual_to_editable_ppt
+  - uses
+  - platform_compat
+- - graph_visualize
+  - uses
+  - platform_compat
+- - trash_util
+  - uses
+  - platform_compat
 - - ingest_document
   - uses
   - pptx_document
@@ -2085,6 +2173,30 @@ contracts:
   checks:
   - workspace_state_authority
 verification:
+  python_requirements:
+  - python3 .scripts/ubuntu_preflight.py --python-only --strict
+  - python3 .scripts/test_platform_compat.py
+  - python3 .scripts/engineering_graph.py validate
+  docling_requirements:
+  - python3 .scripts/ubuntu_preflight.py --docling --strict
+  - python3 .scripts/engineering_graph.py validate
+  platform_compat:
+  - python3 .scripts/test_platform_compat.py
+  - python3 .scripts/test_visual_qa.py
+  - python3 .scripts/engineering_graph.py validate
+  document_text:
+  - python3 .scripts/test_platform_compat.py
+  - python3 .scripts/test_ingest_document.py
+  - python3 .scripts/test_ingest_inbox_dispatch.py
+  - python3 .scripts/engineering_graph.py validate
+  ubuntu_setup:
+  - python3 .scripts/test_platform_compat.py
+  - python3 .scripts/ubuntu_preflight.py --strict --smoke
+  - python3 .scripts/engineering_graph.py validate
+  ubuntu_preflight:
+  - python3 .scripts/test_platform_compat.py
+  - python3 .scripts/ubuntu_preflight.py
+  - python3 .scripts/engineering_graph.py validate
   inbox_source_policy:
   - python3 .scripts/test_chat_intake.py
   - python3 .scripts/test_ingest_pipeline.py
@@ -2216,6 +2328,51 @@ verification:
   - python3 .scripts/test_visual_qa.py
   - python3 .scripts/engineering_graph.py validate
 script_contracts:
+  ubuntu_preflight:
+    preconditions:
+    - 只读检查当前解释器、requirements 导入、Ubuntu 系统命令、Tesseract 语言和可选 Docling 环境
+    - --smoke 只在自动清理的系统临时目录构造最小 PPTX 并用发现到的 LibreOffice 转为 PDF
+    - --strict 是部署验收门；普通运行仅列出 ready、missing 与 smoke 结果，便于安装前诊断
+    writes:
+    - --smoke 期间仅写自动清理的系统临时目录
+    forbidden:
+    - 安装系统包、修改宿主配置或写入 Raw、Wiki、graph.db、inbox 与仓库 temp
+    - 缺少工具时把 skipped 或 missing 报告为通过
+    verify:
+    - python3 .scripts/test_platform_compat.py
+    - python3 .scripts/ubuntu_preflight.py
+    - python3 .scripts/engineering_graph.py validate
+  platform_compat:
+    preconditions:
+    - shared 适配层只解析宿主平台命令与环境，不改变业务数据、来源内容或 Agent/API 控制循环
+    - Ubuntu 优先使用 PATH 与 Freedesktop 标准工具；macOS 保留现有 open、trash 与应用包 LibreOffice 兼容路径
+    - WSL 桌面打开将已有 Linux 目标转换为 Windows 路径；xdg-open 返回 4 或 explorer.exe 返回 1 仅在 WSL bridge 可用且目标存在时视为已接受启动，并停止后续 fallback 以免重复窗口
+    - LibreOffice 调用保留调用者 FONTCONFIG_FILE/FONTCONFIG_PATH；只有打包运行时存在随附配置时才局部补充子进程环境
+    writes: []
+    forbidden:
+    - 安装系统包、修改宿主字体或全局环境变量
+    - 找不到桌面 opener 或系统回收站时永久删除文件
+    - 用平台适配改变摄入分类、语义内容、Raw/Wiki/Graph 或事务边界
+    verify:
+    - python3 .scripts/test_platform_compat.py
+    - python3 .scripts/test_visual_qa.py
+    - python3 .scripts/engineering_graph.py validate
+  document_text:
+    preconditions:
+    - DOCX 使用结构化 OOXML 读取获得平台一致的正文文本；原件仍由受管摄入事务完整保留
+    - 旧 DOC 依次使用宿主可用的 textutil、LibreOffice、antiword 或 catdoc；未配置转换器时返回空文本并由既有校验阻断，不创建伪内容
+    - inbox 分类预览与通用文档正式提取共享同一适配器，预览只做长度裁剪
+    writes:
+    - 仅 LibreOffice 转换时写入自动清理的系统临时目录
+    forbidden:
+    - 修改来源文档或把临时转换结果当 Raw 事实源
+    - 以扩展名替代既有来源类型分类
+    - 转换失败后编造、补全或规范化正文
+    verify:
+    - python3 .scripts/test_platform_compat.py
+    - python3 .scripts/test_ingest_document.py
+    - python3 .scripts/test_ingest_inbox_dispatch.py
+    - python3 .scripts/engineering_graph.py validate
   inbox_source_policy:
     preconditions:
     - shared 确定性策略，无模型调用；对话原件与系统暂存副本物理分离
@@ -3147,12 +3304,13 @@ script_contracts:
     - python3 .scripts/engineering_graph.py validate
   ingest_document:
     preconditions:
-    - shared PPTX 原生解析按 presentation 顺序输出逐页 Markdown、对象坐标、列表层级、原生表格空值与合并范围及独立备注；不以 pandoc plain 作为摄入正文
+    - shared PPTX 原生解析按 presentation 顺序输出逐页 Markdown、对象坐标、列表层级、原生表格空值与合并范围及独立备注；摄入正文与 inbox 分类预览共用该结果，不调用不支持 PPTX 输入的 pandoc
     - PPTX 复用 visual_qa 本地渲染，不以版式 QA pass 代替内容复核；Agent/API 语义前均交接源、原生文本和逐页图像哈希绑定的 pptx_review agent-task-v1，保持原 semantic_backend，不自动上传或调用 DSH
     - PPTX 复核须覆盖全部页的文字、布局及高风险数字/状态；表格另核行列，图片/非文本对象须核遗漏信息；关键未决项阻断，非关键限制持久化；独立 image_ocr 回执仅在页图源哈希匹配时复用，不另造远程视觉调用
     - PPTX 原件、逐页 companion 与同源 source.json 同事务落位；finalize 重校源/渲染/原生文本/复核与 companion 哈希及 sidecar，任何缺失或变更均拒绝；页图/PDF 仅暂存，不进入 Raw manifest
     - shared 表格清单原则只维护于 INGEST「表格型清单与台账」；Agent 路由与任务输入 locator 指向该段，API wiki/slots adapter 加载同一段，不新增分类调用或控制循环
     - shared Excel 提取支持 .xls（xlrd）与 .xlsx（openpyxl），原件和忠实 Markdown companion 同事务落位；保留工作表、原始行号、空值、隐藏状态和合并范围，不静默清洗或去重；xls 单元格为保存值，xlsx 同时保留公式与缓存值，不重新计算公式
+    - shared Word 提取由 document_text 统一处理；DOCX 按 OOXML 结构读取，旧 DOC 选择可用的宿主转换器；分类预览与正式提取共用结果语义，失败由既有校验阻断
     - 图片 source_type=ocr，复核后仍不自动升为 high；shared 编译 Wiki 复核状态与正文限制，sidecar 保留完整复核记录；非正式普通文本不得仅凭 ordinary 推为官方高可信来源
     - 独立图片走 image_ocr shared 校验与 Markdown companion；--ocr-result 显式消费源哈希匹配的回执；视觉 backend 与上传授权独立配置，默认 API 转写与复核；无授权/关键未决/调用失败只输出不含原图的精简任务，显式 IMAGE_OCR_BACKEND=agent 才交接宿主；保持同一事务与原 semantic_backend
     - 图片 finalize 前重新核对原图、暂存实体 SHA-256 与 companion 全文；缺失、改动或非同源时拒绝落位，不能靠 manifest 过滤缺失文件后继续
@@ -3442,7 +3600,7 @@ script_contracts:
     - 本次仅迁移 OCR/视觉检测；可编辑 PPT 重建独立配置；2026-09-11 用户显式指定主模型 GLM-5.3-Flash，回退 GLM-4.5V，不以 OCR/QA 测试冒充重建质量验证
     - 运行时自动读取仓库根 `.env` 并展开同文件 `${NAME}` 引用，进程环境同名变量优先；VISUAL_QA_API_BASE/KEY 可引用主 LLM endpoint/key
     - raw、inbox、私有源材料与 paper-profile 论文/稿件 PDF 默认只做本地确定性检查；只有调用方显式 allow_remote 才允许上传页面图像到远程视觉 API
-    - shared 本地渲染对打包 macOS LibreOffice 显式加载其随附 fontconfig 配置；保留调用者 FONTCONFIG_FILE/PATH，不修改宿主字体或原件；旧渲染不覆写，摄入可新建同源事务并在成功后受管 supersede
+    - shared 本地渲染在 Ubuntu 从 SOFFICE_BIN、PATH 与标准安装位置发现 LibreOffice，对打包 macOS/Codex LibreOffice 加载随附 fontconfig；保留调用者 FONTCONFIG_FILE/PATH，不修改宿主字体或原件；旧渲染不覆写，摄入可新建同源事务并在成功后受管 supersede
     writes:
     - temp/visual-qa/<artifact-sha>/<profile>/<check-key>/ 下 manifest、逐页 receipt、渲染缓存与 summary
     forbidden:

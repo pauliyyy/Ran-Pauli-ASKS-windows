@@ -4,16 +4,17 @@
 inbox 摄入成功后清理源文件与临时提取目录时使用：即使后续流程异常，
 源文件仍可从废纸篓找回，避免永久丢失。
 
-策略：优先用 /usr/bin/trash（有独立 TCC 权限，移入系统废纸篓）；
-trash 后验证源已消失，若仍存在则回退到项目内 temp/trash/ 保底。"""
+策略：优先使用宿主可用的系统废纸篓命令；命令后验证源已消失，
+若仍存在则回退到项目内 temp/trash/ 保底。"""
 from __future__ import annotations
 import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
 
+import platform_compat
+
 REPO = Path(__file__).resolve().parent.parent
-_TRASH_BIN = shutil.which("trash")
 
 
 def trash_path(path) -> None:
@@ -21,11 +22,13 @@ def trash_path(path) -> None:
     p = Path(path)
     if not p.exists() and not p.is_symlink():
         return
-    # 优先：/usr/bin/trash（NSWorkspace.recycleURLs，移入系统废纸篓）
-    if _TRASH_BIN:
-        result = subprocess.run([_TRASH_BIN, str(p)], capture_output=True, text=True)
-        if result.returncode == 0 and not p.exists():
-            return  # 成功移入系统废纸篓
+    for command in platform_compat.system_trash_commands(p):
+        try:
+            result = subprocess.run(command, capture_output=True, text=True)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode == 0 and not p.exists() and not p.is_symlink():
+            return
     # 回退：项目内 temp/trash/（可见、可恢复，避免永久丢失）
     _move_to_project_trash(p)
 

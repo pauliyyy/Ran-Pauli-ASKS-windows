@@ -215,9 +215,18 @@ python3 paper-artifacts/v0.2.1/verify.py
 ```bash
 git clone https://github.com/ranshiju/Ran-ASKS.git
 cd Ran-ASKS
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install --upgrade pip
+python3 -m pip install -r requirements.txt
+python3 .scripts/ubuntu_preflight.py --python-only --strict
 cp .env.example .env
 python3 .scripts/engineering_graph.py validate
 ```
+
+Ubuntu 支持基线为 22.04 及后续版本、Python 3.10 或更高版本。文档转换、幻灯片
+渲染、OCR、桌面打开和可恢复清理所需的系统包，以及无桌面服务器和独立 Docling
+环境的设置，见 [Ubuntu 安装与验证指南](operations/UBUNTU.md)。
 
 只有需要模型的工作流才需要在 `.env` 中配置模型后端。摄入编排由独立的
 `INGEST_BACKEND` 选择；API 摄入还可以通过 `INGEST_GENERATION_*` 和
@@ -245,6 +254,8 @@ python3 .scripts/route.py --task query --query-stage start
 | --- | --- |
 | `AGENTS.md` | 项目宪法、任务路由和不可违反的边界 |
 | `operations/` | 摄入、查询、研究、写作、同步和工程契约 |
+| `operations/UBUNTU.md` | Ubuntu 22.04+ 安装、系统工具映射与验证 |
+| `requirements.txt` | 共享 Python 运行时与回归依赖 |
 | `.scripts/` | 经过验证的命令行工具和回归检查 |
 | `dsh/` | 可选的受约束智能体循环和工具注册表 |
 | `academic/`、`admin/`、`teaching/`、`business/` | 相互独立的领域模板 |

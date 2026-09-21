@@ -204,7 +204,12 @@ def cluster_hub_keywords(keywords, max_clusters=MAX_CLUSTERS):
     best_t, best_score, best_ev, best_clusters = candidates[0]
     best_sizes = [len(c["keywords"]) for c in best_clusters]
     best_bal = min(best_sizes) / max(best_sizes) if max(best_sizes) > 0 else 0
-    print(f"[hub_split] 选最优 t={best_t:.2f} 综合={best_score:.3f} (覆盖={best_ev["coverage"]:.3f} 重合={best_ev["overlap"]:.3f} 均衡={best_bal:.2f} 簇={best_sizes})", file=sys.stderr)
+    print(
+        f"[hub_split] 选最优 t={best_t:.2f} 综合={best_score:.3f} "
+        f"(覆盖={best_ev['coverage']:.3f} 重合={best_ev['overlap']:.3f} "
+        f"均衡={best_bal:.2f} 簇={best_sizes})",
+        file=sys.stderr,
+    )
     return best_clusters
 
 
