@@ -5,12 +5,14 @@ from __future__ import annotations
 import argparse
 import copy
 import fnmatch
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import date
 from pathlib import Path
 
@@ -20,6 +22,8 @@ REPO = Path(__file__).resolve().parent.parent
 MANIFEST_PATH = REPO / "operations/engineering/open-source-manifest.yaml"
 VERSION_PATH = REPO / "VERSION"
 MARKER = ".wikigraph-public-release"
+PROVENANCE_PATH = "RELEASE_PROVENANCE.json"
+PROVENANCE_SCHEMA = "wikigraph-public-release-provenance-v1"
 PUBLIC_GRAPH_PATH = "operations/engineering/graph.yaml"
 PUBLIC_CONTACT = "sjran@cnu.edu.cn"
 RELEASE_DOCUMENTATION_PATHS = {
@@ -29,8 +33,11 @@ RELEASE_DOCUMENTATION_PATHS = {
 }
 INTRODUCTION_PREFIX = "docs/introduction/ASKS-Chinese-Introduction-"
 NORMALIZED_PDF_PRODUCER = b"GPL Ghostscript"
+MISSING_GLYPHS = {"\ufffd", "\u25a1", "\u25a0"}
 VERSION_PATTERN = re.compile(r"^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$")
+GIT_OBJECT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 PRIVATE_PREFIXES = (
+    "private/",
     "academic/raw/", "academic/wiki/", "academic/outputs/",
     "admin/raw/", "admin/wiki/", "admin/outputs/",
     "teaching/raw/", "teaching/wiki/", "teaching/outputs/",
@@ -61,7 +68,20 @@ def read_version() -> str | None:
 
 
 def release_badge(version: str) -> str:
-    return f"> Current release: v{version}"
+    return f"> Current main version: v{version}"
+
+
+def update_changelog_links(text: str, version: str) -> str:
+    """Point moving-main and version references at refs created by publication."""
+    lines = text.rstrip().splitlines()
+    prefixes = ("[Unreleased]:", f"[{version}]:")
+    lines = [line for line in lines if not line.startswith(prefixes)]
+    lines.extend([
+        "",
+        f"[Unreleased]: https://github.com/ranshiju/Ran-ASKS/compare/v{version}...HEAD",
+        f"[{version}]: https://github.com/ranshiju/Ran-ASKS/releases/tag/v{version}",
+    ])
+    return "\n".join(lines) + "\n"
 
 
 def next_version(current: str, level: str) -> str:
@@ -75,13 +95,29 @@ def next_version(current: str, level: str) -> str:
     return f"{major}.{minor}.{patch + 1}"
 
 
-def prepare_version(level: str, reason: str, from_version: str, *, apply: bool = False,
-                    release_date: str | None = None) -> dict:
+def bilingual_release_notes_errors(text: str, label: str) -> list[str]:
+    failures = []
+    if not re.search(r"^### Highlights\s*$", text, re.M):
+        failures.append(f"{label} changelog section is missing '### Highlights'")
+    if not re.search(r"^### 主要更新\s*$", text, re.M):
+        failures.append(f"{label} changelog section is missing '### 主要更新'")
+    if not re.search(r"[A-Za-z]{3,}", text):
+        failures.append(f"{label} changelog section has no English release text")
+    if not re.search(r"[\u3400-\u9fff]", text):
+        failures.append(f"{label} changelog section has no Chinese release text")
+    return failures
+
+
+def prepare_version(level: str, reason: str, reason_zh: str, from_version: str, *,
+                    apply: bool = False, release_date: str | None = None) -> dict:
     current = read_version()
     if current != from_version:
         raise ValueError(f"VERSION changed: expected {from_version}, found {current}; do not bump twice on retry")
-    if not reason.strip() or "\n" in reason or "\r" in reason:
-        raise ValueError("a non-empty single-line semantic change/compatibility rationale is required")
+    if (not reason.strip() or "\n" in reason or "\r" in reason
+            or not reason_zh.strip() or "\n" in reason_zh or "\r" in reason_zh):
+        raise ValueError("non-empty single-line English and Chinese semantic rationales are required")
+    if not re.search(r"[A-Za-z]{3,}", reason) or not re.search(r"[\u3400-\u9fff]", reason_zh):
+        raise ValueError("--reason must be English and --reason-zh must be Chinese")
     new_version = next_version(current, level)
     dated = date.fromisoformat(release_date).isoformat() if release_date else date.today().isoformat()
     manifest = load_manifest()
@@ -90,15 +126,20 @@ def prepare_version(level: str, reason: str, from_version: str, *, apply: bool =
     match = re.search(r"^## \[Unreleased\][^\n]*\n(.*?)(?=^## \[|\Z)", text, re.M | re.S)
     if not match or not re.search(r"^- \S", match[1], re.M):
         raise ValueError("public CHANGELOG Unreleased must contain reviewed user-facing changes")
+    note_errors = bilingual_release_notes_errors(match[1], "Unreleased")
+    if note_errors:
+        raise ValueError("; ".join(note_errors))
     if re.search(rf"^## \[{re.escape(new_version)}\]", text, re.M):
         raise ValueError(f"CHANGELOG already contains {new_version}")
     section = (f"## [Unreleased]\n\n## [{new_version}] - {dated}\n\n"
-               f"### Version decision\n\n- {level.upper()}: {reason.strip()}\n\n"
+               f"### Version decision / 版本判断\n\n"
+               f"- {level.upper()}: {reason.strip()}\n"
+               f"- {level.upper()}（中文）：{reason_zh.strip()}\n\n"
                + match[1].strip() + "\n\n")
-    updated = text[:match.start()] + section + text[match.end():]
+    updated = update_changelog_links(text[:match.start()] + section + text[match.end():], new_version)
     writes = {VERSION_PATH: new_version + "\n", changelog: updated, REPO / "CHANGELOG.md": updated}
     plan = {"status": "applied" if apply else "planned", "from": current, "to": new_version,
-            "level": level, "reason": reason.strip(), "date": dated,
+            "level": level, "reason": reason.strip(), "reason_zh": reason_zh.strip(), "date": dated,
             "writes": [str(path.relative_to(REPO)) for path in writes]}
     if apply:
         originals = {path: path.read_bytes() if path.exists() else None for path in writes}
@@ -116,17 +157,57 @@ def prepare_version(level: str, reason: str, from_version: str, *, apply: bool =
 
 
 def localized_release_badge(version: str) -> str:
-    return f"> 当前发布版本: v{version}"
+    return f"> 当前 main 版本: v{version}"
 
 
 def matches(path: str, pattern: str) -> bool:
     return fnmatch.fnmatchcase(path, pattern) or Path(path).match(pattern)
 
 
+def checked_release_path(relative: str) -> Path:
+    """Manifest entries are paths, not authority to export private or outside data."""
+    if (not relative or "\\" in relative or ":" in relative
+            or Path(relative).is_absolute() or ".." in Path(relative).parts):
+        raise ValueError(f"unsafe release path: {relative}")
+    path = Path(relative)
+    if "private" in [part.lower() for part in path.parts]:
+        raise ValueError(f"private content is never publishable: {relative}")
+    return path
+
+
+def checked_release_source(relative: str) -> Path:
+    path = REPO / checked_release_path(relative)
+    resolved = path.resolve()
+    if not resolved.is_relative_to(REPO.resolve()):
+        raise ValueError(f"release source escapes repository: {relative}")
+    if "private" in [part.lower() for part in resolved.relative_to(REPO.resolve()).parts]:
+        raise ValueError(f"release source resolves to private content: {relative}")
+    # Reject directory symlinks too; skipping only symlink leaf files is insufficient.
+    cursor = path
+    while cursor != REPO:
+        if cursor.is_symlink():
+            raise ValueError(f"release source contains symlink: {relative}")
+        cursor = cursor.parent
+    return path
+
+
+def release_preflight(manifest: dict) -> set[str]:
+    files = selected_files(manifest)
+    for relative, asset in manifest.get("public_assets", {}).items():
+        checked_release_path(relative)
+        source = checked_release_source(asset)
+        if not source.is_file():
+            raise ValueError(f"missing public asset: {asset}")
+    for directory in manifest.get("template_dirs", []):
+        checked_release_path(directory)
+    return files
+
+
 def selected_files(manifest: dict) -> set[str]:
     files: set[str] = set()
     excludes = manifest.get("exclude", [])
     for pattern in manifest["include"]:
+        checked_release_path(pattern)
         prefix = pattern.split("**", 1)[0].rstrip("/")
         root = REPO / prefix
         candidates = root.rglob("*") if "**" in pattern else (root,)
@@ -135,16 +216,110 @@ def selected_files(manifest: dict) -> set[str]:
                 continue
             relative = candidate.relative_to(REPO).as_posix()
             if matches(relative, pattern) and not any(matches(relative, excluded) for excluded in excludes):
+                checked_release_source(relative)
                 files.add(relative)
     return files
 
 
 def expected_files(manifest: dict) -> set[str]:
-    files = selected_files(manifest)
+    files = release_preflight(manifest)
     files.update(manifest.get("public_assets", {}).keys())
     files.update(f"{directory}/.gitkeep" for directory in manifest["template_dirs"])
     files.add(MARKER)
+    files.add(PROVENANCE_PATH)
     return files
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def release_payload_sha256(destination: Path) -> str:
+    """Hash the generated payload without the self-describing marker/provenance files."""
+    digest = hashlib.sha256()
+    for relative in sorted(actual_files(destination) - {MARKER, PROVENANCE_PATH}):
+        encoded = relative.encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big"))
+        digest.update(encoded)
+        digest.update(bytes.fromhex(sha256_file(destination / relative)))
+    return digest.hexdigest()
+
+
+def git_source_identity(repository: Path = REPO) -> tuple[str | None, str | None]:
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD^{commit}"], cwd=repository, text=True, capture_output=True
+    )
+    tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=repository, text=True, capture_output=True
+    )
+    if commit.returncode or tree.returncode:
+        return None, None
+    return commit.stdout.strip(), tree.stdout.strip()
+
+
+def pdf_render_health(path: Path) -> dict:
+    """Mechanically reject unreadable, missing-glyph, blank, or truncated PDF pages."""
+    try:
+        import fitz
+    except ImportError as error:
+        raise ValueError("PyMuPDF is required for introduction PDF verification") from error
+    try:
+        document = fitz.open(path)
+    except Exception as error:
+        raise ValueError(f"unable to open PDF {path.name}: {error}") from error
+    try:
+        if document.page_count < 1:
+            raise ValueError(f"PDF has no pages: {path.name}")
+        pages = []
+        text_pages = 0
+        for index, page in enumerate(document):
+            text = page.get_text()
+            missing = sorted(character for character in MISSING_GLYPHS if character in text)
+            if missing:
+                raise ValueError(f"PDF page {index + 1} contains missing-glyph markers: {path.name}")
+            if text.strip():
+                text_pages += 1
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(0.5, 0.5), colorspace=fitz.csGRAY, alpha=False)
+            samples = memoryview(pixmap.samples)
+            ink = sum(1 for value in samples if value < 245)
+            if ink < max(20, len(samples) // 5000):
+                raise ValueError(f"PDF page {index + 1} renders blank: {path.name}")
+            pages.append({"page": index + 1, "text_chars": len(text), "ink_pixels": ink})
+        if not text_pages:
+            raise ValueError(f"PDF has no extractable text pages: {path.name}")
+        return {"page_count": document.page_count, "pages": pages}
+    finally:
+        document.close()
+
+
+def write_release_provenance(destination: Path, manifest: dict, *, source_commit: str | None,
+                             source_tree: str | None, source_mode: str) -> None:
+    commit = source_commit or "0" * 40
+    tree = source_tree or "0" * 40
+    if not GIT_OBJECT_PATTERN.fullmatch(commit) or not GIT_OBJECT_PATTERN.fullmatch(tree):
+        raise ValueError("source commit/tree must be full lowercase Git object IDs")
+    version = read_version()
+    if version is None:
+        raise ValueError("valid VERSION required for release provenance")
+    pdf_health = {
+        relative: pdf_render_health(destination / relative)
+        for relative in sorted(dated_introduction_paths(manifest, ".pdf"))
+    }
+    payload = {
+        "schema": PROVENANCE_SCHEMA,
+        "version": version,
+        "source": {"mode": source_mode, "commit": commit, "tree": tree},
+        "manifest_sha256": sha256_file(MANIFEST_PATH),
+        "payload_sha256": release_payload_sha256(destination),
+        "pdf_render_health": pdf_health,
+    }
+    (destination / PROVENANCE_PATH).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def dated_introduction_paths(manifest: dict, suffix: str) -> set[str]:
@@ -255,7 +430,11 @@ def projected_engineering_graph(destination: Path) -> dict:
         path = str(node.get("path", ""))
         if "<" in path:
             return True
-        if path.startswith("projects/") or path.startswith(".project/"):
+        if path == PUBLIC_GRAPH_PATH:
+            return True
+        if (path.startswith(".project/")
+                or (path.startswith("projects/")
+                    and not path.startswith("projects/_templates/research/"))):
             return False
         return bool(node.get("optional", False)) or (destination / path).exists()
 
@@ -305,31 +484,55 @@ def clear_destination(destination: Path) -> None:
             child.unlink()
 
 
-def build(destination: Path, clean: bool, force: bool) -> None:
-    manifest = load_manifest()
-    destination = destination.resolve()
-    if destination == REPO:
-        raise ValueError("destination must not be the source repository")
-    if destination.exists() and any(destination.iterdir()):
-        if not clean:
-            raise ValueError("destination is non-empty; use --clean --force")
-        if not force:
-            raise ValueError("--clean requires --force")
-        clear_destination(destination)
+def install_release_tree(staging: Path, destination: Path) -> None:
+    """Replace destination contents while preserving .git and restoring on any failure."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
     destination.mkdir(parents=True, exist_ok=True)
+    backup = Path(tempfile.mkdtemp(prefix=".wikigraph-release-backup-", dir=destination.parent))
+    installed: list[Path] = []
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for child in list(destination.iterdir()):
+            if child.name == ".git":
+                continue
+            target = backup / child.name
+            os.replace(child, target)
+            moved.append((target, child))
+        for child in list(staging.iterdir()):
+            target = destination / child.name
+            os.replace(child, target)
+            installed.append(target)
+    except Exception:
+        for path in reversed(installed):
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink(missing_ok=True)
+        for source, target in reversed(moved):
+            if source.exists() or source.is_symlink():
+                os.replace(source, target)
+        raise
+    finally:
+        shutil.rmtree(backup, ignore_errors=True)
+
+
+def populate_release(destination: Path, manifest: dict, *, source_commit: str | None,
+                     source_tree: str | None, source_mode: str) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    selected = release_preflight(manifest)
     version = read_version()
     if version is None:
         raise ValueError(f"invalid or missing release version: {VERSION_PATH}")
-    for relative in sorted(selected_files(manifest)):
+    for relative in sorted(selected):
         if relative == PUBLIC_GRAPH_PATH:
             continue
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(REPO / relative, target)
+        shutil.copy2(checked_release_source(relative), target)
     for relative, asset in manifest.get("public_assets", {}).items():
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(REPO / asset, target)
+        shutil.copy2(checked_release_source(asset), target)
     for directory in manifest["template_dirs"]:
         target = destination / directory
         target.mkdir(parents=True, exist_ok=True)
@@ -337,6 +540,39 @@ def build(destination: Path, clean: bool, force: bool) -> None:
     write_projected_engineering_graph(destination)
     stamp_readmes(destination, version)
     (destination / MARKER).write_text("Generated by .scripts/open_source_release.py\n", encoding="utf-8")
+    write_release_provenance(
+        destination, manifest, source_commit=source_commit, source_tree=source_tree,
+        source_mode=source_mode,
+    )
+
+
+def build(destination: Path, clean: bool, force: bool, *, source_commit: str | None = None,
+          source_tree: str | None = None, source_mode: str = "working-tree") -> None:
+    manifest = load_manifest()
+    destination = destination.resolve()
+    if (destination == REPO.resolve() or destination.is_relative_to(REPO.resolve())
+            or REPO.resolve().is_relative_to(destination)):
+        raise ValueError("destination must not overlap the source repository")
+    release_preflight(manifest)  # before touching even an existing release
+    if destination.exists() and any(destination.iterdir()):
+        if not clean:
+            raise ValueError("destination is non-empty; use --clean --force")
+        if not force:
+            raise ValueError("--clean requires --force")
+    if source_commit is None or source_tree is None:
+        detected_commit, detected_tree = git_source_identity()
+        source_commit = source_commit or detected_commit
+        source_tree = source_tree or detected_tree
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".wikigraph-release-stage-", dir=destination.parent) as temporary:
+        staging = Path(temporary) / "release"
+        populate_release(
+            staging, manifest, source_commit=source_commit, source_tree=source_tree,
+            source_mode=source_mode,
+        )
+        if verify(staging):
+            raise ValueError("staged public release verification failed; destination was not changed")
+        install_release_tree(staging, destination)
     print(f"Built {len(expected_files(manifest))} public files in {destination}")
 
 
@@ -352,7 +588,8 @@ def stamp_readmes(destination: Path, version: str) -> None:
             raise ValueError(f"destination {name} missing during version stamping")
         text = readme.read_text(encoding="utf-8")
         marker = re.compile(
-            r"^> (?:Current release|当前发布版本): v[^\n]*$", re.MULTILINE
+            r"^> (?:Current release|Current main version|当前发布版本|当前 main 版本): v[^\n]*$",
+            re.MULTILINE,
         )
         if marker.search(text):
             text = marker.sub(lambda _match: badge, text, count=1)
@@ -370,7 +607,12 @@ def actual_files(destination: Path) -> set[str]:
     return {
         path.relative_to(destination).as_posix()
         for path in destination.rglob("*")
-        if path.is_file() and ".git" not in path.relative_to(destination).parts
+        if (
+            path.is_file()
+            and ".git" not in path.relative_to(destination).parts
+            and "__pycache__" not in path.relative_to(destination).parts
+            and path.suffix not in {".pyc", ".pyo"}
+        )
     }
 
 
@@ -395,6 +637,23 @@ def git_ignored_files(destination: Path, paths: set[str]) -> list[str]:
     return [line for line in checked.stdout.splitlines() if line]
 
 
+def prospective_git_ignored_files(tree: Path, paths: set[str]) -> list[str]:
+    """Audit release paths against the ignore rules shipped by that release tree."""
+    with tempfile.TemporaryDirectory(prefix="wikigraph-ignore-audit-") as temporary:
+        audit = Path(temporary)
+        for source in tree.rglob(".gitignore"):
+            relative = source.relative_to(tree)
+            target = audit / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        initialized = subprocess.run(
+            ["git", "init", "-q"], cwd=audit, text=True, capture_output=True,
+        )
+        if initialized.returncode:
+            raise ValueError(f"git ignore audit init failed: {initialized.stderr.strip()}")
+        return git_ignored_files(audit, paths)
+
+
 def documentation_omission_errors(destination: Path, manifest: dict, files: set[str]) -> list[str]:
     """Keep explicitly unlisted features out of reader-facing Markdown, not runtime instructions."""
     failures = []
@@ -411,14 +670,59 @@ def documentation_omission_errors(destination: Path, manifest: dict, files: set[
     return failures
 
 
+def release_provenance_errors(destination: Path, manifest: dict, version: str | None) -> list[str]:
+    path = destination / PROVENANCE_PATH
+    if not path.is_file():
+        return [f"missing release provenance: {PROVENANCE_PATH}"]
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        return [f"invalid release provenance: {error}"]
+    failures = []
+    if data.get("schema") != PROVENANCE_SCHEMA:
+        failures.append("release provenance schema mismatch")
+    if version and data.get("version") != version:
+        failures.append("release provenance version mismatch")
+    source = data.get("source") if isinstance(data.get("source"), dict) else {}
+    if source.get("mode") not in {"working-tree", "committed"}:
+        failures.append("release provenance source mode is invalid")
+    for key in ("commit", "tree"):
+        if not GIT_OBJECT_PATTERN.fullmatch(str(source.get(key, ""))):
+            failures.append(f"release provenance source {key} is invalid")
+    if data.get("manifest_sha256") != sha256_file(MANIFEST_PATH):
+        failures.append("release provenance manifest hash mismatch")
+    if data.get("payload_sha256") != release_payload_sha256(destination):
+        failures.append("release provenance payload hash mismatch")
+    expected_pdf_health = {}
+    try:
+        for relative in sorted(dated_introduction_paths(manifest, ".pdf")):
+            expected_pdf_health[relative] = pdf_render_health(destination / relative)
+    except ValueError as error:
+        failures.append(str(error))
+    if expected_pdf_health and data.get("pdf_render_health") != expected_pdf_health:
+        failures.append("release provenance PDF render health mismatch")
+    return failures
+
+
 def verify(destination: Path) -> int:
     manifest = load_manifest()
     destination = destination.resolve()
     failures: list[str] = []
     if not (destination / MARKER).is_file():
         failures.append(f"missing release marker: {MARKER}")
-    expected = expected_files(manifest)
+    try:
+        expected = expected_files(manifest)
+    except ValueError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 1
     actual = actual_files(destination)
+    for entry in destination.rglob("*"):
+        if ".git" in entry.relative_to(destination).parts:
+            continue
+        if entry.is_symlink():
+            failures.append(f"release symlink is forbidden: {entry.relative_to(destination)}")
+        if "private" in [part.lower() for part in entry.relative_to(destination).parts]:
+            failures.append(f"private content path: {entry.relative_to(destination)}")
     failures.extend(documentation_omission_errors(destination, manifest, actual))
     version = read_version()
     if version is None:
@@ -447,6 +751,13 @@ def verify(destination: Path) -> int:
             latest = re.search(r"^## \[(\d+\.\d+\.\d+)\]", changelog_text, re.M)
             if not latest or latest[1] != version:
                 failures.append("CHANGELOG.md newest release heading must match VERSION")
+            current_section = re.search(
+                rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)",
+                changelog_text, re.M | re.S,
+            )
+            if current_section:
+                failures.extend(bilingual_release_notes_errors(current_section[1], f"[{version}]"))
+    failures.extend(release_provenance_errors(destination, manifest, version))
     for path in sorted(expected - actual):
         failures.append(f"missing expected file: {path}")
     for path in sorted(actual - expected):
@@ -492,6 +803,8 @@ def verify(destination: Path) -> int:
         if path.startswith(PRIVATE_PREFIXES) and not path.endswith("/.gitkeep"):
             failures.append(f"private content path: {path}")
         content_path = destination / path
+        if content_path.is_symlink():
+            continue
         if content_path.stat().st_size > 10_000_000:
             failures.append(f"oversized release file: {path}")
             continue
@@ -517,22 +830,33 @@ def main() -> None:
     build_parser.add_argument("destination", type=Path)
     build_parser.add_argument("--clean", action="store_true")
     build_parser.add_argument("--force", action="store_true")
+    build_parser.add_argument("--source-commit")
+    build_parser.add_argument("--source-tree")
+    build_parser.add_argument("--source-mode", choices=("working-tree", "committed"),
+                              default="working-tree")
     verify_parser = subparsers.add_parser("verify")
     verify_parser.add_argument("destination", type=Path)
     prepare_parser = subparsers.add_parser("prepare-version")
     prepare_parser.add_argument("--level", choices=["patch", "minor", "major"], required=True)
     prepare_parser.add_argument("--reason", required=True)
+    prepare_parser.add_argument("--reason-zh", required=True)
     prepare_parser.add_argument("--from-version", required=True)
     prepare_parser.add_argument("--date")
     prepare_parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
     try:
         if args.command == "prepare-version":
-            print(json.dumps(prepare_version(args.level, args.reason, args.from_version,
-                                            apply=args.apply, release_date=args.date), ensure_ascii=False, indent=2))
+            print(json.dumps(prepare_version(
+                args.level, args.reason, args.reason_zh, args.from_version,
+                apply=args.apply, release_date=args.date,
+            ), ensure_ascii=False, indent=2))
             return
         if args.command == "build":
-            build(args.destination, args.clean, args.force)
+            build(
+                args.destination, args.clean, args.force,
+                source_commit=args.source_commit, source_tree=args.source_tree,
+                source_mode=args.source_mode,
+            )
         else:
             sys.exit(verify(args.destination))
     except (OSError, ValueError, yaml.YAMLError) as error:

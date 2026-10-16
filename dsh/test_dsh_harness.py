@@ -66,6 +66,45 @@ def test_sessionlog_to_jsonl():
     assert obj["data"]["query"] == "q"
 
 
+def test_sessionlog_persists_only_for_private_knowledge_build_scope():
+    temp_root = REPO / "temp"
+    temp_root.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix="dsh-journal-", dir=temp_root))
+    journal = directory / "session.jsonl"
+    previous_scope = os.environ.get("ASKS_DSH_SCOPE")
+    previous_path = os.environ.get("DSH_SESSION_LOG_PATH")
+    try:
+        os.environ["ASKS_DSH_SCOPE"] = "knowledge_build"
+        os.environ["DSH_SESSION_LOG_PATH"] = str(journal)
+        log = SessionLog(session_id="build123")
+        log.append("turn/start", {"scope": "knowledge_build"})
+        persisted = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+        assert persisted == [{
+            "ts": log.events()[0].ts,
+            "type": "turn/start",
+            "data": {"scope": "knowledge_build"},
+        }]
+        assert journal.stat().st_mode & 0o777 == 0o600
+
+        os.environ["ASKS_DSH_SCOPE"] = "oral_exam"
+        disabled = directory / "oral.jsonl"
+        os.environ["DSH_SESSION_LOG_PATH"] = str(disabled)
+        SessionLog().append("turn/start", {"scope": "oral_exam"})
+        assert not disabled.exists()
+    finally:
+        if previous_scope is None:
+            os.environ.pop("ASKS_DSH_SCOPE", None)
+        else:
+            os.environ["ASKS_DSH_SCOPE"] = previous_scope
+        if previous_path is None:
+            os.environ.pop("DSH_SESSION_LOG_PATH", None)
+        else:
+            os.environ["DSH_SESSION_LOG_PATH"] = previous_path
+        for path in directory.glob("*"):
+            path.unlink()
+        directory.rmdir()
+
+
 # ============ ToolRegistry ============
 
 def test_registry_register_and_get():
@@ -308,6 +347,25 @@ def test_citation_records_read_raw():
     ctx = ToolExecution(name="read_raw", arguments={"locator": "raw/demo.md"}, agent_id="a1")
     guard.on_post_execute(ctx, ToolExecutionResult(content="some text"))
     assert "raw/demo.md" in guard.read_sources
+
+
+def test_citation_records_original_for_companion():
+    temp_root = REPO / "temp"
+    temp_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=str(temp_root)) as temporary:
+        folder = Path(temporary)
+        original = folder / "managed.docx"
+        companion = folder / "managed.md"
+        original.write_bytes(b"synthetic docx fixture")
+        companion.write_text("alpha\nverified evidence\n", encoding="utf-8")
+        locator = companion.relative_to(REPO).as_posix() + "#L2"
+        original_source = original.relative_to(REPO).as_posix()
+        guard = CitationGuard()
+        ctx = ToolExecution(name="read_raw", arguments={"locator": locator}, agent_id="a1")
+        guard.on_post_execute(ctx, ToolExecutionResult(content="some text"))
+        assert locator in guard.read_sources
+        assert original_source in guard.read_sources
+        assert guard.check([original_source]).ok is True
 
 
 def test_citation_ignores_failed_read_raw():

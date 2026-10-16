@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate project-scoped comic images through an explicit remote image API."""
+"""Generate illustrations and avatars through an explicit remote image API."""
 from __future__ import annotations
 
 import argparse
@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+import env_config
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -67,29 +69,11 @@ def _append_jsonl(path: Path, value: Any) -> None:
 
 
 def _expand_env(values: dict[str, str]) -> dict[str, str]:
-    pattern = re.compile(r"\$\{([A-Z0-9_]+)\}")
-    expanded = dict(values)
-    for _ in range(len(values) + 1):
-        updated = {
-            key: pattern.sub(lambda match: expanded.get(match.group(1), match.group(0)), value)
-            for key, value in expanded.items()
-        }
-        if updated == expanded:
-            return updated
-        expanded = updated
-    return expanded
+    return env_config.expand_references(values)
 
 
 def load_comic_env(env_file: Path | None = None) -> dict[str, str]:
-    values: dict[str, str] = {}
     source = env_file or (REPO / ".env")
-    if source.is_file():
-        for raw_line in source.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            name, value = line.split("=", 1)
-            values[name.strip()] = value.strip().strip('"').strip("'")
     known = {
         "LLM_API_BASE",
         "LLM_API_KEY",
@@ -99,8 +83,7 @@ def load_comic_env(env_file: Path | None = None) -> dict[str, str]:
         "COMIC_IMAGE_ENDPOINT",
         "COMIC_IMAGE_RESPONSE_FORMAT",
     }
-    values.update({name: value for name, value in os.environ.items() if name in known})
-    return _expand_env(values)
+    return env_config.load_env(source, keys=known)
 
 
 def load_catalog(path: Path = MODEL_CATALOG) -> dict[str, Any]:
@@ -153,17 +136,35 @@ def project_root(project: str, repo: Path = REPO) -> Path:
     return result
 
 
-def allowed_output_root(output_root: Path, repo: Path = REPO) -> Path:
+def _checked_repository_path(path: Path, repo: Path = REPO) -> Path:
+    """Reject output aliases before resolving so private cannot alias public."""
     root = repo.resolve()
-    candidate = output_root.expanduser()
+    candidate = path.expanduser()
     if not candidate.is_absolute():
         candidate = root / candidate
+    elif candidate.is_relative_to(repo.absolute()):
+        candidate = root / candidate.relative_to(repo.absolute())
+    if not candidate.is_relative_to(root) or ".." in candidate.parts:
+        raise ComicGenerationError("path must stay inside the repository")
+    current = root
+    for part in candidate.relative_to(root).parts:
+        current = current / part
+        if current.is_symlink():
+            raise ComicGenerationError("image input/output paths must not use symlinks")
+    return candidate.resolve()
+
+
+def allowed_output_root(output_root: Path, repo: Path = REPO) -> Path:
+    root = repo.resolve()
+    candidate = _checked_repository_path(output_root, repo)
     result = candidate.resolve()
     if not result.is_relative_to(root) or result.name != "outputs" or not result.is_dir():
         raise ComicGenerationError("output root must be an existing repository outputs directory")
     relative_parts = set(result.relative_to(root).parts)
-    if relative_parts.intersection({"raw", "wiki", "private", "inbox", ".git", ".research-memory"}):
+    if relative_parts.intersection({"raw", "wiki", "inbox", ".git", ".research-memory"}):
         raise ComicGenerationError("output root is inside a forbidden repository area")
+    if "private" in relative_parts and result != root / "private" / "outputs":
+        raise ComicGenerationError("private images require the private/outputs root")
     return result
 
 
@@ -180,10 +181,23 @@ def output_directory(
     else:
         outputs = allowed_output_root(Path(explicit_output_root), repo)
     _safe_segment(article_id, "article_id")
-    result = (outputs / article_id / "images").resolve()
+    result = _checked_repository_path(outputs / article_id / "images", repo)
     if not result.is_relative_to(outputs):
         raise ComicGenerationError("output path escapes the project outputs directory")
     return result
+
+
+def read_prompt_file(path: Path, directory: Path, repo: Path = REPO) -> str:
+    source = _checked_repository_path(path, repo)
+    outputs = directory.parent.parent
+    if not source.is_relative_to(outputs) or not source.is_file():
+        raise ComicGenerationError("prompt file must be inside the selected outputs root")
+    if source.stat().st_size > 80000:
+        raise ComicGenerationError("prompt file exceeds 80000 bytes")
+    try:
+        return source.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ComicGenerationError("prompt file must be readable UTF-8 text") from exc
 
 
 def resolve_storyboard(project: str | None, storyboard: Path, repo: Path = REPO) -> tuple[Path, Path]:
@@ -440,6 +454,8 @@ def generate_asset(
     if not prompt or len(prompt) > 20000:
         raise ComicGenerationError("prompt must contain 1-20000 characters")
     directory = output_directory(project, article_id, repo, explicit_output_root)
+    for name in ("receipts", "manifest.json", "prompts.jsonl", *(f"{asset_id}.{ext}" for ext in IMAGE_EXTENSIONS)):
+        _checked_repository_path(directory / name, repo)
     existing = _existing_asset(directory, asset_id)
     if existing and not overwrite:
         raise ComicGenerationError(f"asset already exists: {existing}")
@@ -621,11 +637,13 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--overwrite", action="store_true")
         command.add_argument("--dry-run", action="store_true")
 
-    generate = subparsers.add_parser("generate", help="Generate one comic image")
+    generate = subparsers.add_parser("generate", help="Generate one illustration or avatar")
     add_generation_options(generate)
     generate.add_argument("--article-id", required=True)
     generate.add_argument("--asset-id", required=True)
-    generate.add_argument("--prompt", required=True)
+    prompt_source = generate.add_mutually_exclusive_group(required=True)
+    prompt_source.add_argument("--prompt")
+    prompt_source.add_argument("--prompt-file", type=Path, help="UTF-8 prompt inside the selected outputs root")
     generate.add_argument("--parameters", default="{}", help="Extra JSON request parameters")
 
     batch = subparsers.add_parser("batch", help="Generate all assets in a project storyboard")
@@ -642,6 +660,9 @@ def main(argv: list[str] | None = None) -> int:
             _json_print({"status": "ok", "candidates": image_candidates(args.catalog)})
             return 0
         if args.command == "generate":
+            if args.prompt_file:
+                directory = output_directory(args.project, args.article_id, args.repo, args.output_root)
+                args.prompt = read_prompt_file(args.prompt_file, directory, args.repo)
             if not args.model:
                 config = load_comic_env(args.env_file)
                 args.model = config.get("COMIC_IMAGE_MODEL") or ""

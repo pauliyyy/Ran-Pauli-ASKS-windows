@@ -15,34 +15,71 @@ The public release is an engineering template, never a copy of the personal know
 - **Private**: all raw sources, personal or production compiled Wiki pages, graph databases, caches, outputs, inbox items, local memory, active project materials, personal state, and personal Codex skills declared private by the manifest. A sanitized paper-specific Wiki/Graph export is public only when it is versioned under `paper-artifacts/`, explicitly allowlisted, independently licensed, and verified.
 - **Review required**: a document that mixes public engineering rules with personal data must be split before publication. Put stable rules in public engineering documents and private context in `*.private.md` or a private project/status file.
 
-## Release version
+### Unconditional private exclusion
 
-- The canonical public release version is the root `VERSION` file, formatted as `MAJOR.MINOR.PATCH`; documentation must not duplicate a current-version constant.
-- `open_source_release.py build` reads `VERSION`, writes it to the destination tree, and stamps `> Current release: v<version>` into the public `README.md`.
+`private/` is denied independently of the manifest: include rules, renamed asset sources,
+asset destinations, and template directories cannot authorize it. Release paths must be
+repository-relative, confined, and free of traversal or symlink indirection. Preflight
+checks run before clearing an existing destination; the destination cannot overlap the
+source repository. Verification rejects private paths (including empty directories)
+and symlinks in the generated tree. Run `.scripts/test_open_source_release.py` to check
+these boundaries using synthetic data only.
+
+This is a path/export boundary, not automatic content declassification: never copy private
+text into an allowlisted public asset. Source `.gitignore` does not untrack existing files
+or erase Git history; do not publish the source repository. History cleanup requires a
+separately reviewed migration. Private maintenance receipts and backups stay under
+`private/outputs/`, never in a release or shared temporary directory.
+
+## Pending reader-facing updates
+
+- [x] 2026-10-15：v0.17.0 中英文 README 已说明本仓库为 Shi-Ju Ran 开发的 macOS 版本，并加入其他合作者开发维护的 Windows 版本入口：<https://github.com/RuichengQu/Ran-ASKS-Windows>。归属依据用户提供的信息，不据此宣称兼容性认证或官方 Reference Distribution 身份。
+
+## Public-tree version and immutable tags
+
+- The canonical moving-main version is the root `VERSION` file, formatted as `MAJOR.MINOR.PATCH`; documentation must not duplicate a current-version constant.
+- `open_source_release.py build` reads `VERSION`, writes it to the destination tree, and stamps `> Current main version: v<version>` into the public `README.md`.
 - `open_source_release.py verify` rejects a version mismatch between source `VERSION`, destination `VERSION`, and the README release badge.
-- Edit release notes only in `operations/engineering/open-source-assets/CHANGELOG.md`. `prepare-version --apply` synchronizes this asset and the source root `CHANGELOG.md` mirror; `build` copies the asset to the public root. The newest release heading must match `VERSION` before publication.
+- Edit release notes only in `operations/engineering/open-source-assets/CHANGELOG.md`. Every new `Unreleased`/version section contains parallel `### Highlights` and `### 主要更新` sections, and the semantic version rationale is recorded in English and Chinese. `prepare-version --apply` synchronizes this asset and the source root `CHANGELOG.md` mirror; `build` copies the asset to the public root. The newest release heading must match `VERSION` before publication.
 - Keep the changelog human-readable: prioritize important user-facing capabilities, behavior or contract changes, compatibility, quality, and security; summarize minor fixes and internal adjustments instead of listing them individually.
 - Every GitHub update requires a content-level documentation review. Synchronize the English README, Chinese README, dated Chinese introduction Markdown, and its version-scope note with any affected capabilities, configuration, workflow, or user guidance. The release verifier rejects a pending or latest committed public diff that does not include all four reader-facing documents.
-- The Markdown introduction is the default GitHub reading view. Retain the dated PDF for download and printing, and update it whenever the introduction's reader-facing content changes. Normalize the PDF after Word export for portable rendering; the release asset must contain a Ghostscript producer marker, and `verify` rejects the original Word/Quartz export even when local PDF tools accept it.
+- The Markdown introduction is the default GitHub reading view. Retain the dated PDF for download and printing, and update it whenever the introduction's reader-facing content changes. Normalize the PDF after Word export for portable rendering. `verify` checks the Ghostscript producer, page count, extractable text, missing-glyph markers, nonblank page renders and recorded render-health metadata. Human comparison with the reviewed edit source remains required because mechanical rendering cannot establish semantic or layout equivalence.
 - Before every actual public update, the host Agent automatically assesses the highest semantic change level and records the capability/compatibility rationale. Do not infer it from file counts, line counts, or the last Git tag: compare with the published tree and its `VERSION`. The deterministic `prepare-version` command calculates the next number; it does not call an LLM or classify changes itself.
 - Every public update advances `VERSION`, including documentation-only updates. `verify` rejects unchanged or decreasing versions against `HEAD` for pending changes, or `HEAD^` for the latest committed change when clean. Initial trees without a commit baseline are exempt. Rebuilding or retrying the same prepared batch does not allocate another version; `--from-version` rejects accidental repeated preparation. With no actual change to publish, do not prepare another version or publication commit.
-- Number allocation does not authorize a Git tag or GitHub Release. Create those only when separately requested; frozen paper artifacts keep their own immutable boundaries.
+- Starting with `v0.12.0`, every published public-tree version receives an annotated immutable Git tag with the same version. `open_source_publish.py` creates the local tag after the verified publication commit; `--push` atomically pushes the branch and tag, then confirms both resolve to that commit. An existing local or remote tag fails closed and is never moved.
+- A GitHub Release remains a separately authorized milestone or paper-archive action. Paper artifacts keep their own immutable data boundaries; creating the routine version tag does not create or modify a GitHub Release.
 - This number is separate from pipeline versioning: `CURRENT_PIPELINE_VERSION` in `.scripts/graph_lib.py` tracks content-pipeline upgrades and is never the public release number.
 - Increment PATCH for compatible fixes or documentation-only releases, MINOR for backward-compatible public capabilities, and MAJOR for breaking public contracts.
 - Apply this decision policy explicitly during `0.x` development too: record compatibility changes rather than silently treating all pre-1.0 updates as interchangeable. A large internal refactor can remain PATCH; a small new public capability can warrant MINOR.
 
 ## Release workflow
 
-1. Review the diff against the current GitHub state and its `VERSION`, classify PATCH/MINOR/MAJOR, and add reviewed notes under the public asset's `Unreleased` heading. Preview `prepare-version --level <level> --reason '<semantic rationale>' --from-version <current>`; then run the same command with `--apply` once. It updates `VERSION`, archives the notes with the date and decision rationale, and synchronizes the source root changelog. It refuses empty notes, stale expected versions, and duplicate release headings.
+1. Review the diff against the current GitHub state and its `VERSION`, classify PATCH/MINOR/MAJOR, and add reviewed English and Chinese notes under the public asset's `Unreleased` heading. Preview `prepare-version --level <level> --reason '<English rationale>' --reason-zh '<中文依据>' --from-version <current>`; then run the same command with `--apply` once. It updates `VERSION`, archives the notes with the date and bilingual decision rationale, and synchronizes the source root changelog. It refuses missing languages, empty notes, stale expected versions, and duplicate release headings.
 2. Update the manifest when a public engineering file is added or moved. Synchronize both READMEs and the Chinese introduction Markdown plus its scope note; if reader-facing introduction content changed, update its PDF edition from the same reviewed source. Build a clean tree; the command only copies manifest-approved files and never allocates another version.
-3. Verify the tree before staging or publishing.
+3. Commit all manifest-selected source files for the release. Uncommitted personal projects and private/temp outputs do not block publication, but any selected source, public asset, `VERSION`, manifest or release script drift does.
 4. Verify every included paper artifact with its declared verifier. The base
    `v0.2.0` artifact uses `.scripts/paper_artifact.py verify`; additive audit
    extensions such as `v0.2.1` use their versioned `verify.py`.
-5. In a Git worktree, verify that no manifest-approved release file is excluded
-   by the destination `.gitignore`.
-6. Review the staged diff and confirm that documentation describes the affected behavior rather than merely changing dates or version badges; then run the normal engineering regressions.
-7. Commit the reviewed source changes locally and the generated public changes in the public repository. Verify the committed public tree again, then push only the public repository and confirm its remote commit. Never push the personal source repository as a substitute for the allowlisted public tree.
+5. Before installation, verify that no manifest-approved release file is excluded
+   by the prospective tree's `.gitignore`; this lets a release update its own ignore
+   boundary. After installation, repeat the check in the destination Git worktree.
+6. Run `open_source_publish.py` with `--dry-run`. It resolves an explicit source commit, checks selected-source cleanliness, fetches and checks the public branch, builds from a detached source worktree, writes provenance, validates a temporary release tree and reports the planned diff without changing the public worktree.
+7. Review the planned diff and confirm that documentation describes the affected behavior rather than merely changing dates or version badges. Re-run without `--dry-run` to transactionally install and commit the generated public tree and create its annotated version tag. Add `--push` only when GitHub publication is authorized; the command atomically pushes the branch and tag without force, then confirms both with `ls-remote`. It never creates a GitHub Release.
+
+### External contribution round trip
+
+The public GitHub repository is currently a generated release tree, not an
+independent source of truth. Treat an external pull request as a reviewable
+contribution proposal. If accepted, import the patch into the governed source
+repository, preserve the contributor's authorship, run the complete release
+checks, regenerate the public tree, and close the proposal with the resulting
+public commit. Do not merge a public-tree-only change and wait for a later
+release to reconcile it; the next managed publication could overwrite it.
+
+Independent Community Downstreams own their domain behavior, data, evaluations,
+releases, upgrades, and support. The publication process does not grant
+ASKS-Compatible, official, or Reference Distribution status. Those identities
+are governed by the published `GOVERNANCE.md` and `ECOSYSTEM.md`.
 
 Normalize the Word-exported PDF before placing it in the public-assets directory:
 
@@ -61,7 +98,18 @@ python3 .scripts/open_source_release.py build /path/to/WikiGraph_clean --clean -
 python3 .scripts/open_source_release.py verify /path/to/WikiGraph_clean
 ```
 
-`--clean` deletes only the existing release worktree contents (never the source repository) and requires `--force` when the destination is non-empty. The build writes `.wikigraph-public-release` as a destination marker.
+Direct `build` is a development/preview entry point. It builds and validates a temporary tree before replacing the destination, preserves `.git`, and restores the original destination if installation fails. Production publication uses:
+
+```bash
+python3 .scripts/open_source_publish.py /path/to/WikiGraph_clean \
+  --expected-remote-url git@github.com:ranshiju/Ran-ASKS.git \
+  --message 'feat: release vX.Y.Z ...' --dry-run
+python3 .scripts/open_source_publish.py /path/to/WikiGraph_clean \
+  --expected-remote-url git@github.com:ranshiju/Ran-ASKS.git \
+  --message 'feat: release vX.Y.Z ...' --push
+```
+
+The generated `.wikigraph-public-release` marker identifies the managed tree. `RELEASE_PROVENANCE.json` records the source commit/tree, manifest hash, release version, payload hash and PDF render health. GitHub Actions repeats release verification, engineering-graph validation, release regressions and frozen-artifact verification on pull requests and `main` pushes. Protect `main` with this required check while retaining an explicit path for the managed publisher. Do not require every update to arrive through a GitHub merge until the publisher has a reviewed bypass or public code becomes the authoritative source.
 
 The generated `operations/engineering/graph.yaml` is a deterministic public projection. Nodes whose concrete paths are absent from the allowlisted release, including active `projects/` and `.project/` material, are removed together with dependent edges, verification entries, and script contracts. Placeholder paths remain available for reusable templates. A public capability may not lose a required node: the build fails instead of publishing an incomplete capability. Run `engineering_graph.py validate` inside the generated tree as part of release review.
 
@@ -71,7 +119,7 @@ be self-contained under a public script or versioned `paper-artifacts/` path.
 
 ## Maintenance rule
 
-Do not hand-edit the generated public worktree except for Git metadata. Make engineering changes in the source repository, then rebuild the release. If a private detail appears in a public document, split it at the source and add a regression assertion when the pattern is mechanically detectable.
+Do not hand-edit the generated public worktree except through the managed publication commit. Make engineering changes in the source repository, commit the selected release inputs, then publish from that source commit. If a private detail appears in a public document, split it at the source and add a regression assertion when the pattern is mechanically detectable.
 
 The generic Raw/Wiki ignore rules must not hide a manifest-approved frozen
 artifact. `paper-artifacts/**` is an explicit tracking exception, and release

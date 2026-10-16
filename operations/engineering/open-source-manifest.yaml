@@ -2,19 +2,45 @@ version: 1
 purpose: "公开发布白名单：只允许此清单声明的工程文件进入开源副本。"
 include:
   - VERSION
+  - pyproject.toml
+  - uv.lock
+  - ran_asks/**
+  - examples/demo/**
+  - examples/providers/**
+  # Generic research source only; no active projects, runtime state or output artifacts.
+  - projects/_templates/research/AGENTS.md
+  - projects/_templates/research/README.md
+  - projects/_templates/research/codes/README.md
+  - projects/_templates/research/codes/analysis/README.md
+  - projects/_templates/research/codes/docs/PHYSICS.md
+  - projects/_templates/research/codes/docs/README.md
+  - projects/_templates/research/codes/experiments/README.md
+  - projects/_templates/research/codes/tests/README.md
+  - projects/_templates/research/notes/status.md
+  - projects/_templates/research/outputs/.gitkeep
+  - projects/_templates/research/schema.yaml
+  - DOWNSTREAM.md
+  - LINUX_CHANGELOG.md
   - AGENTS.md
   - .env.example
   - .gitignore
+  - .github/workflows/public-release.yml
   - requirements.txt
   - requirements-docling.txt
-  - preprocess.py
+  - requirements-linux.txt
+  # Includes local-only presentation runtime/state/renderer/delivery and isolated regression fixtures.
   - .scripts/**
+  - computing/code-library/src/tensor_train.py
+  - computing/code-library/tests/test_tensor_train.py
   - .codex/skills/manuscript-diagnosis/SKILL.md
   - .codex/skills/manuscript-diagnosis/agents/openai.yaml
   - .codex/skills/manuscript-diagnosis/scripts/diagnosis_preflight.py
   - .codex/skills/manuscript-diagnosis/scripts/test_diagnosis_preflight.py
   - agents/**
   - dsh/**
+  # Generic host instructions live under operations; local memory remains excluded.
+  # Includes oral-exam contracts, styles and help; private records remain excluded.
+  # Includes PRESENTATION.md and presentation-test-plan.md; no active presentation assets.
   - operations/**
   - academic/SCHEMA.md
   - admin/SCHEMA.md
@@ -25,6 +51,7 @@ include:
   - operations/engineering/engineering-handbook.md
   - operations/engineering/code-guidance.md
 exclude:
+  - private/**
   - "**/.DS_Store"
   - .scripts/e1_experiment.py
   - .scripts/e1_order_robustness.py
@@ -41,6 +68,8 @@ exclude:
   - "**/*.pyc"
   - "**/*.db"
 public_assets:
+  computing/code-library/README.md: operations/engineering/open-source-assets/computing/code-library/README.md
+  computing/code-library/graph.yaml: operations/engineering/open-source-assets/computing/code-library/graph.yaml
   README.md: operations/engineering/open-source-assets/README.md
   README.zh-CN.md: operations/engineering/open-source-assets/README.zh-CN.md
   CHANGELOG.md: operations/engineering/open-source-assets/CHANGELOG.md
@@ -55,8 +84,16 @@ public_assets:
   .gitignore: operations/engineering/open-source-assets/.gitignore
   DATA_POLICY.md: operations/engineering/open-source-assets/DATA_POLICY.md
   CONTRIBUTING.md: operations/engineering/open-source-assets/CONTRIBUTING.md
+  GOVERNANCE.md: operations/engineering/open-source-assets/GOVERNANCE.md
+  ECOSYSTEM.md: operations/engineering/open-source-assets/ECOSYSTEM.md
   SECURITY.md: operations/engineering/open-source-assets/SECURITY.md
+  docs/security/threat-model.md: operations/engineering/open-source-assets/docs/security/threat-model.md
   LICENSE: operations/engineering/open-source-assets/LICENSE
+  templates/cv/README.md: operations/engineering/open-source-assets/templates/cv/README.md
+  templates/cv/academic-full.docx: operations/engineering/open-source-assets/templates/cv/academic-full.docx
+  templates/cv/academic-full.template.yaml: operations/engineering/open-source-assets/templates/cv/academic-full.template.yaml
+  templates/cv/cv-records.example.yaml: operations/engineering/open-source-assets/templates/cv/cv-records.example.yaml
+  templates/downstream/DOWNSTREAM.md: operations/engineering/open-source-assets/templates/downstream/DOWNSTREAM.md
   operations/engineering/engineering-handbook.md: operations/engineering/open-source-assets/engineering-handbook.md
   operations/engineering/code-guidance.md: operations/engineering/open-source-assets/code-guidance.md
 template_dirs:

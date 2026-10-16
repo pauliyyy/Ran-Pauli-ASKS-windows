@@ -180,7 +180,7 @@ def test_ubuntu_preflight_reports_missing_and_ready_tools(tmp: Path) -> None:
             platform="linux",
             run=run,
             import_probe=lambda name: (True, name),
-            version_info=(3, 10, 0),
+            version_info=(3, 12, 0),
             repo=tmp,
         )
     assert report["ready"] is True
@@ -196,7 +196,7 @@ def test_ubuntu_preflight_reports_missing_and_ready_tools(tmp: Path) -> None:
             platform="linux",
             run=run,
             import_probe=lambda name: (False, f"missing import {name}"),
-            version_info=(3, 9, 0),
+            version_info=(3, 11, 0),
             repo=tmp,
         )
     assert missing["ready"] is False

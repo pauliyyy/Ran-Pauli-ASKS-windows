@@ -238,11 +238,16 @@ def _hub_lifecycle_boundary(operation: str, paths_fn, *, require_all: bool = Tru
     return decorate
 
 
-def _section_body(path: str | Path, heading: str) -> tuple[str, object | None]:
-    target = _page_file(path)
-    if not target.is_file():
-        return "", None
-    section = wl.get_wiki_section(target, heading)
+def _section_body(path: str | Path, heading: str, *, text: str | None = None) -> tuple[str, object | None]:
+    if text is None:
+        target = _page_file(path)
+        if not target.is_file():
+            return "", None
+        section = wl.get_wiki_section(target, heading)
+    else:
+        sections, _definitions = wl.parse_wiki_text(text)
+        wanted = wl.heading_slug(heading)
+        section = next((item for item in sections if item.slug == wanted), None)
     if section is None:
         return "", None
     lines = []
@@ -258,8 +263,8 @@ def _section_body(path: str | Path, heading: str) -> tuple[str, object | None]:
     return text, section
 
 
-def read_paper_profile(path: str | Path) -> DirectionProfile | None:
-    text, section = _section_body(path, "研究方向定位")
+def read_paper_profile(path: str | Path, *, text: str | None = None) -> DirectionProfile | None:
+    text, section = _section_body(path, "研究方向定位", text=text)
     if not text or section is None:
         return None
     target = _page_file(path)
@@ -444,6 +449,7 @@ def route_profile(
     }
 
 
+@gl.graph_scoped
 def route_paper(conn, page: str, **kwargs) -> dict:
     profile = read_paper_profile(page)
     if profile is None:
@@ -610,6 +616,74 @@ def _managed_artifact(relative: str, prefix: str) -> Path | None:
     except ValueError:
         return None
     return target
+
+
+def completed_split_resolution(conn, candidate: dict) -> dict | None:
+    parent = candidate.get("hub")
+    clusters = candidate.get("clusters")
+    if not isinstance(parent, str) or not parent.startswith("academic/wiki/hubs/"):
+        return None
+    if not isinstance(clusters, list) or len(clusters) < 2:
+        return None
+    member_groups = []
+    for cluster in clusters:
+        members = cluster.get("members") if isinstance(cluster, dict) else None
+        if not isinstance(members, list) or not members or not all(
+            isinstance(member, str) and member for member in members
+        ):
+            return None
+        member_groups.append(set(members))
+    all_members = set().union(*member_groups)
+    if sum(map(len, member_groups)) != len(all_members):
+        return None
+    child_paths = []
+    for row in conn.execute(
+        "SELECT DISTINCT nodes.path,nodes.status,nodes.description FROM edges "
+        "JOIN nodes ON nodes.path=edges.object "
+        "WHERE edges.subject=? AND edges.predicate='子方向' AND nodes.type='hub'",
+        (parent,),
+    ):
+        child = row["path"]
+        if not child.startswith("academic/wiki/hubs/"):
+            continue
+        scope = read_hub_scope(child)
+        frontmatter = _frontmatter(child)
+        if (row["status"] in {"retired", "archived"}
+                or frontmatter.get("status") in {"retired", "archived"}
+                or frontmatter.get("parent") != parent
+                or validate_scope(scope) or row["description"] != scope):
+            continue
+        if any(
+            history["operation"] == "split" and any(
+                related.get("path") == parent for related in history["related_hubs"]
+            )
+            for history in scope_history(conn, child)
+        ):
+            child_paths.append(child)
+    if len(child_paths) < len(member_groups):
+        return None
+    member_placeholders = ",".join("?" for _ in all_members)
+    family = [parent, *child_paths]
+    family_placeholders = ",".join("?" for _ in family)
+    memberships = {path: set() for path in family}
+    for row in conn.execute(
+        f"SELECT subject,object FROM edges WHERE predicate=? "
+        f"AND subject IN ({member_placeholders}) AND object IN ({family_placeholders})",
+        (MEMBERSHIP_PREDICATE, *sorted(all_members), *family),
+    ):
+        memberships[row["object"]].add(row["subject"])
+    if memberships[parent]:
+        return None
+    matched = []
+    for members in member_groups:
+        matches = [child for child in child_paths if memberships[child] == members]
+        if len(matches) != 1 or matches[0] in matched:
+            return None
+        matched.append(matches[0])
+    return {
+        "status": "applied", "parent": parent, "children": matched,
+        "basis": "canonical_split_history_and_membership",
+    }
 
 
 def _finish_hub_route_action(envelope: dict, remaining: int) -> None:
@@ -1014,6 +1088,7 @@ def _score_membership_candidates(
     return ranked, "scored"
 
 
+@gl.graph_scoped
 def plan_memberships(conn, node_ids: Iterable[str] | None = None) -> dict:
     """Plan overlapping, rebuildable Hub memberships without modifying the graph."""
     profiles = ordinary_profiles(conn, node_ids)
@@ -1316,6 +1391,7 @@ def _profile_id(profile: NodeProfile | DirectionProfile) -> str:
     return profile.node_id if isinstance(profile, NodeProfile) else profile.page
 
 
+@gl.graph_scoped
 def analyze_split(conn, hub_path: str) -> dict:
     """Generate a typed-member split candidate; never write lifecycle state."""
     profiles = member_profiles(conn, hub_path)
@@ -1372,6 +1448,7 @@ def analyze_split(conn, hub_path: str) -> dict:
     }
 
 
+@gl.graph_scoped
 def analyze_new_hubs(conn, node_ids: Iterable[str] | None = None) -> dict:
     """Find coherent unassigned ordinary-node components; candidates only."""
     profiles = [item for item in ordinary_profiles(conn, node_ids)
@@ -1425,6 +1502,7 @@ def analyze_new_hubs(conn, node_ids: Iterable[str] | None = None) -> dict:
     }
 
 
+@gl.graph_scoped
 def analyze_merge_candidates(conn) -> dict:
     """Compare canonical Hub definitions/prototypes; a score can only nominate."""
     hubs = [hub for hub in list_hubs(conn) if hub.canonical]
@@ -1615,6 +1693,7 @@ def legacy_scope_plan(conn) -> dict:
     "split",
     lambda values: [values["parent"], *[child.get("path", "") for child in values["children"]]],
 )
+@gl.graph_scoped
 def apply_split(conn, parent: str, children: list[dict], *, agent_confirmed: bool = False) -> dict:
     if not agent_confirmed:
         raise PermissionError("Hub 分裂必须由 Agent 确认子 Scope")
@@ -1936,6 +2015,7 @@ def _redistribution_handoffs(
     return handoffs, residual_splits, backlog_count
 
 
+@gl.graph_scoped
 def plan_redistribution(conn, parent: str) -> dict:
     """Plan membership changes within one parent/direct-child Hub family."""
     definitions = {item.path: item for item in list_hubs(conn)}
@@ -2095,6 +2175,7 @@ def redistribute_hub_members(
     }
 
 
+@gl.graph_scoped
 def auto_create_check(conn, node_ids: Iterable[str] | None = None) -> dict:
     """摄入末期 Hub 检查：筛选新 Hub 与既存 Hub 分裂候选。
 
@@ -2182,6 +2263,7 @@ def _suggest_parent(conn, candidate: dict) -> dict:
     ],
     require_all=False,
 )
+@gl.graph_scoped
 def create_hubs_from_definitions(conn, definitions: list[dict]) -> dict:
     """Agent 生成定义后，validate + create_hub + apply membership。
 

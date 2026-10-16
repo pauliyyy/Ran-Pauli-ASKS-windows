@@ -12,6 +12,7 @@
 from __future__ import annotations
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -21,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 import agent_task
 import recovery_policy as rp
+import source_fingerprints as sf
 
 
 def call_json(*args, **kwargs):
@@ -176,18 +178,30 @@ def _has_raw_line_handles(text: str) -> bool:
     return re.search(r"(?m)^<[^>\n]+#L\d+>[ \t]", text) is not None
 
 
-def _clip_context_section(content: str, cap: int) -> str:
+def _clip_context_section(content: str, cap: int, *, preserve_lines: bool = False) -> str:
     """超长 section 保留头部为主、尾部兜底，避免单段吞掉预算。"""
     content = content.strip()
     if len(content) <= cap:
         return content
-    if not _has_raw_line_handles(content):
-        head = content[: int(cap * 0.8)]
-        tail = content[-int(cap * 0.2):]
-        return f"{head}\n\n[...中段省略...]\n\n{tail}"
-    head = _head_fragment(content, int(cap * 0.8))
-    tail = _tail_fragment(content, int(cap * 0.2))
-    parts = [head, "[...中段省略...]", tail]
+    marker = "[...中段省略...]"
+    available = max(0, cap - len(marker) - 4)
+    head_cap = int(available * 0.8)
+    if not preserve_lines and not _has_raw_line_handles(content):
+        tail_cap = available - head_cap
+        parts = [content[:head_cap], marker, content[-tail_cap:] if tail_cap else ""]
+        return "\n\n".join(part for part in parts if part) if cap >= len(marker) else ""
+    head = _head_fragment(content, head_cap)
+    if len(content.splitlines()[0]) > head_cap:
+        head = ""
+    tail = _tail_fragment(content, available - head_cap)
+    last_line = content.splitlines()[-1]
+    if not tail and len(last_line) <= available:
+        tail = last_line
+        head_cap = available - len(tail)
+        head = _head_fragment(content, head_cap)
+        if len(content.splitlines()[0]) > head_cap:
+            head = ""
+    parts = [head, marker, tail] if cap >= len(marker) else []
     return "\n\n".join(part for part in parts if part)
 
 
@@ -195,11 +209,16 @@ def _assemble_reduced_context(profile: dict, sections: list[tuple[str, str]]) ->
     """把已选 section 组装成受预算约束的定向摘要。"""
     budget = profile["reduced_context_max_chars"]
     parts: list[str] = []
-    for title, content in sections:
-        cap = min(profile["section_char_cap"], max(1_500, budget))
-        part = f"--- [{title}] ---\n{_clip_context_section(content, cap)}"
+    for index, (title, content) in enumerate(sections):
+        header = f"--- [{title}] ---\n"
+        separator_size = 2 if parts else 0
+        available = budget - len(header) - separator_size
+        if available <= 0:
+            break
+        cap = min(profile["section_char_cap"], available // (len(sections) - index))
+        part = header + _clip_context_section(content, cap, preserve_lines=profile.get("extractor") == "read_paper")
         parts.append(part)
-        budget -= len(part)
+        budget -= len(part) + separator_size
         if budget <= 0:
             break
     return "\n\n".join(parts)
@@ -262,8 +281,47 @@ def _extract_markdown_sections(text: str, requested: tuple[str, ...]) -> list[tu
     return selected
 
 
+def _paper_reference_start(lines: list[str]) -> int | None:
+    for index, line in enumerate(lines):
+        plain = re.sub(r"^<[^>\n]+#L\d+>[ \t]+", "", line).strip()
+        if re.fullmatch(r"(?:#{1,6}\s+)?(?:references|bibliography|参考文献)\s*:?", plain, re.I):
+            return index
+        if re.match(r"^\[1\]\s+\S", plain) and re.search(r"\b(?:18|19|20)\d{2}\b|doi\b|arxiv\b", plain, re.I):
+            following = [item.strip() for item in lines[index + 1:index + 16] if item.strip()]
+            if any(re.match(r"^\[2\]\s+\S", item) for item in following) and any(
+                    re.match(r"^\[3\]\s+\S", item) for item in following):
+                return index
+    return None
+
+
+def _paper_body_windows(text: str, selected: list[tuple[str, str]]) -> tuple[list[tuple[str, str]], int | None]:
+    lines = text.splitlines()
+    reference_start = _paper_reference_start(lines)
+    body = lines[:reference_start] if reference_start is not None else lines
+    end_matter = next((index for index, line in enumerate(body) if re.match(
+        r"^(?:#{1,6}\s+)?(?:acknowledg(?:e)?ments|data availability)\b", line.strip(), re.I)), None)
+    if end_matter is not None:
+        body = body[:end_matter]
+    selected_lines = {line.strip() for _title, content in selected for line in content.splitlines() if line.strip()}
+    remaining = [line for line in body if line.strip() not in selected_lines]
+    total = sum(len(line) + 1 for line in remaining)
+    windows: list[list[str]] = [[], [], []]
+    consumed = 0
+    for line in remaining:
+        window_index = min(2, consumed * 3 // max(1, total))
+        windows[window_index].append(line)
+        consumed += len(line) + 1
+    result = []
+    for label, window in zip(("前部", "中部", "后部"), windows):
+        content = "\n".join(window).strip()
+        if content:
+            result.append((f"fallback: 正文{label}窗口（非章节判定）", content))
+    return result, reference_start + 1 if reference_start is not None else None
+
+
 def build_source_context(kind: str, text: str, *, source_path: Path | str | None = None,
-                         force_reduced: bool = False) -> str:
+                         force_reduced: bool = False, diagnostics: dict | None = None,
+                         raw_source: str | None = None) -> str:
     """统一构造喂给 LLM 的原文上下文。
 
     - 普通文本未超过类型阈值时保留全文，避免无谓改写。
@@ -272,28 +330,72 @@ def build_source_context(kind: str, text: str, *, source_path: Path | str | None
       会议纪要用头部尾部截取。
     """
     profile = context_profile(kind)
+    details = {
+        "source_character_count": len(text), "mode": "full",
+        "requested_sections": list(profile["sections"]),
+        "hit_sections": [], "missing_sections": [],
+    }
+
+    def finish(context: str) -> str:
+        if diagnostics is not None:
+            diagnostics.update(details, context_character_count=len(context))
+        return context
+
+    def annotate_sections(sections: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        if raw_source is None:
+            return sections
+        import wiki_locator
+        section_lines = [content.splitlines() for _title, content in sections]
+        counts = [len(lines) for lines in section_lines]
+        annotated = wiki_locator.annotate_context_lines(
+            "\n".join(line for lines in section_lines for line in lines), text, raw_source).splitlines()
+        result = []
+        offset = 0
+        for (title, _content), count in zip(sections, counts):
+            result.append((title, "\n".join(annotated[offset:offset + count])))
+            offset += count
+        return result
+
     if len(text) <= profile["full_text_max_chars"] and (
             not force_reduced or kind == "paper"):
-        return text
+        if raw_source is not None:
+            import wiki_locator
+            return finish(wiki_locator.annotate_raw_lines(text, raw_source))
+        return finish(text)
 
-    if kind == "paper" and source_path is not None:
-        try:
-            import read_paper
-            paper_path = Path(source_path)
-            hits, _misses, _total = read_paper.extract_sections(
-                paper_path, list(profile["sections"]))
-            if hits:
-                sections = [(title, content) for _req, title, content in hits]
-                return _assemble_reduced_context(profile, sections)
-        except Exception:
-            pass
+    if kind == "paper":
+        hits = []
+        misses = list(profile["sections"])
+        if source_path is not None:
+            try:
+                import read_paper
+                hits, misses, _total = read_paper.extract_sections(
+                    Path(source_path), list(profile["sections"]))
+            except (OSError, ValueError):
+                details["extraction_status"] = "unavailable"
+        sections = []
+        for _req, title, content in hits:
+            section_lines = content.splitlines()
+            reference_start = _paper_reference_start(section_lines)
+            sections.append((title, "\n".join(section_lines[:reference_start])
+                             if reference_start is not None else content))
+        details.update(hit_sections=[requested for requested, _title, _content in hits],
+                       missing_sections=misses, mode="sections")
+        if misses or not hits:
+            windows, reference_start = _paper_body_windows(text, sections)
+            sections.extend(windows)
+            details.update(mode="sections+body_windows" if hits else "body_windows",
+                           reference_start_line=reference_start)
+        return finish(_assemble_reduced_context(profile, annotate_sections(sections)))
 
     if kind == "document":
         sections = _extract_markdown_sections(text, profile["sections"])
         if sections:
-            return _assemble_reduced_context(profile, sections)
+            details["mode"] = "sections"
+            return finish(_assemble_reduced_context(profile, sections))
 
-    return _fallback_head_tail_context(profile, text)
+    details["mode"] = "head_tail"
+    return finish(_fallback_head_tail_context(profile, text))
 
 
 
@@ -466,8 +568,8 @@ def _read_staged_agent_context(state: dict, repo: Path) -> tuple[str, str]:
 
 
 def _split_triple(line: str) -> list[str] | None:
-    parts = [part.strip() for part in line.split("|")]
-    return parts if len(parts) == 3 else None
+    import knowledge_ir
+    return knowledge_ir.parse_semantic_triple_line(line)
 
 
 def apply_semantic_recovery_proposal(semantic_text: str, proposal: dict,
@@ -822,6 +924,11 @@ def validate_semantics(state: dict, REPO: Path, allowed_predicates: set[str],
     semantic_path = REPO / state["semantic_path"]
     sem_text = semantic_path.read_text(encoding="utf-8")
     state["slots_content"] = sem_text
+    canonicalized = canonicalize_semantic_abbreviations(sem_text)
+    if canonicalized != sem_text:
+        semantic_path.write_text(canonicalized, encoding="utf-8")
+        sem_text = canonicalized
+        state["slots_content"] = canonicalized
     # 裸缩写三段式第二步: alias 未命中时从 raw 全文查全称,自动补全为 full(ABBR) 格式
     # 论文管道(step_validate_semantics)已有等价逻辑;此处使文档/会议管道共享同一消解能力
     _raw_abbr_map = load_raw_abbr_map(state.get("wiki_path", ""))
@@ -865,6 +972,7 @@ def validate_semantics(state: dict, REPO: Path, allowed_predicates: set[str],
                     and diagnostics.get("semantic_triple_count", 0) == 0):
                 hard_errors.append("语义槽非空但解析出 0 条三元组，拒绝进入 finalize")
         triples, keywords, *_ = graph_ingest.parse_semantic_text(sem_text, page_path)
+        triples = graph_ingest.normalize_page_subjects(triples, page_path)
         # 谓词校验
         for t in triples:
             pred = t.get("predicate", "")
@@ -879,7 +987,8 @@ def validate_semantics(state: dict, REPO: Path, allowed_predicates: set[str],
                         "subject": t.get("subject", ""),
                         "object": obj,
                     })
-            if obj and is_descriptive_phrase(obj):
+            if (obj and pred not in graph_ingest.CONCEPT_KW_PREDICATES
+                    and is_descriptive_phrase(obj)):
                 slot_warnings.append({
                     "section": "三元组", "line": f"{t.get('subject','')}|{pred}|{obj}",
                     "issue": "descriptive_phrase",
@@ -1210,13 +1319,13 @@ def progress(*args, **kwargs) -> None:
 # ===== 子进程封装 =====
 
 def run(command: list[str], REPO: Path) -> str:
-    """运行子进程，失败抛 RuntimeError。stdout/stderr 实时打印，返回 stdout。"""
+    """运行子进程，stdout 遵循进度通道，stderr 保持可见，失败抛 RuntimeError。"""
     return run_tracked(command, REPO)
 
 
 def run_tracked(command: list[str], REPO: Path, state: dict | None = None,
                 label: str | None = None) -> str:
-    """运行子进程，失败抛 RuntimeError。stdout/stderr 实时打印，返回 stdout。
+    """运行子进程，stdout 遵循进度通道，stderr 保持可见，返回完整 stdout。
 
     P0 遥测：传入 state+label 时记录 returncode/duration，便于事后定位
     「子进程退出码被静默吞掉」的问题。"""
@@ -1224,7 +1333,7 @@ def run_tracked(command: list[str], REPO: Path, state: dict | None = None,
     result = subprocess.run(command, cwd=REPO, text=True, capture_output=True)
     duration_ms = int((time.monotonic() - start) * 1000)
     if result.stdout:
-        print(result.stdout, end="")
+        progress(result.stdout, end="")
     if result.stderr:
         print(result.stderr, end="", file=sys.stderr)
     if state is not None and label:
@@ -1351,6 +1460,7 @@ def step_fill_semantics(state: dict, REPO: Path, normalize_fn) -> tuple[bool, st
         return False, "无语义槽内容"
     normalized = normalize_fn(slots_content)
     normalized = remove_no_info_slot_values(normalized)
+    normalized = canonicalize_semantic_abbreviations(normalized)
     semantic_path = REPO / "temp" / "inbox-state" / f"{state['transaction_id']}-semantic.txt"
     semantic_path.parent.mkdir(parents=True, exist_ok=True)
     semantic_path.write_text(normalized, encoding="utf-8")
@@ -1497,6 +1607,7 @@ def _record_abbreviation_warnings(state: dict, REPO: Path) -> None:
         state["abbreviation_warnings_recorded"] = True
         return
     todo_path = REPO / "cross-domain" / "abbreviation-todo.jsonl"
+    from graph_ingest import BARE_ABBREVIATION_TOKEN_RE
     existing, _errors = _read_abbreviation_todo(todo_path)
     txn = state.get("transaction_id", "")
     page = state.get("wiki_path", "")
@@ -1512,7 +1623,7 @@ def _record_abbreviation_warnings(state: dict, REPO: Path) -> None:
         if _is_page_identity_abbreviation(warning_entry):
             continue
         context = str(w.get("value") or w.get("object") or w.get("subject") or "")
-        tokens = re.findall(r"[A-Z]{2,}[A-Za-z0-9]*", context)
+        tokens = BARE_ABBREVIATION_TOKEN_RE.findall(context)
         for token in tokens:
             additions.append({
                 "schema_version": "abbreviation-todo-v2",
@@ -1655,6 +1766,46 @@ def autofix_bare_abbreviations(sem_text: str, abbr_map: dict) -> str:
     return sem_text
 
 
+def canonicalize_semantic_abbreviations(sem_text: str) -> str:
+    """Reuse an unambiguous canonical concept name already present in one slot bundle."""
+    candidates: dict[str, set[str]] = {}
+    for line in sem_text.splitlines():
+        for raw_field in line.split("|"):
+            field = raw_field.strip()
+            match = re.search(r"[（(]\s*([A-Z]{2,}[A-Za-z0-9]*)\s*[）)]$", field)
+            if match and field != match.group(1):
+                candidates.setdefault(match.group(1), set()).add(field)
+    canonical = {
+        abbreviation: next(iter(names))
+        for abbreviation, names in candidates.items() if len(names) == 1
+    }
+    if not canonical:
+        return sem_text
+    lines = sem_text.splitlines()
+    changed = False
+    for index, line in enumerate(lines):
+        parts = line.split("|")
+        if len(parts) != 3:
+            continue
+        line_changed = False
+        for field_index in (0, 2):
+            raw_field = parts[field_index]
+            replacement = canonical.get(raw_field.strip())
+            if not replacement:
+                continue
+            leading = raw_field[:len(raw_field) - len(raw_field.lstrip())]
+            trailing_length = len(raw_field) - len(raw_field.rstrip())
+            trailing = raw_field[-trailing_length:] if trailing_length else ""
+            parts[field_index] = f"{leading}{replacement}{trailing}"
+            line_changed = True
+        if line_changed:
+            lines[index] = "|".join(parts)
+            changed = True
+    if changed:
+        return "\n".join(lines) + ("\n" if sem_text.endswith("\n") else "")
+    return sem_text
+
+
 def lightweight_abbr_resolve(REPO: Path) -> dict:
     """Query 后轻量裸缩写消解（只查图 alias，不扫 raw，零 LLM）。
 
@@ -1729,6 +1880,7 @@ def _resume_result_item(state: dict, *, file_name: str = "") -> dict:
         "graph_report": state.get("graph_report"),
         "quality_status": state.get("quality_status"),
         "quality_warnings": state.get("quality_warnings", []),
+        "quality_warning_history": state.get("quality_warning_history", []),
     }
 
 
@@ -1779,12 +1931,14 @@ def run_resume_post_maintenance(state: dict) -> dict | None:
     repo = Path(state.get("repo") or state.get("repo_path") or Path(__file__).resolve().parents[1])
     inbox = repo / "inbox"
     from inbox_plan import fact_entries
+    from inbox_source_policy import is_retained
     skip_files = {".gitkeep", ".DS_Store"}
     pending = [
         path for path in inbox.iterdir()
         if (path.is_file()
             and path.name not in skip_files
             and not path.name.startswith(".")
+            and not is_retained(repo, path)
             and (path.name != "facts-pending.md" or fact_entries(path) > 0))
     ] if inbox.is_dir() else []
     parent_batch = _reconcile_parent_batch_report(repo, state)
@@ -2048,7 +2202,7 @@ def step_finalize(state: dict, REPO: Path, config: dict) -> tuple[bool, str]:
 
 
 def step_finalize_tail(state: dict, REPO: Path, config: dict) -> tuple[bool, str]:
-    """收尾三件：log.md 追加 + index.md 追加 + ingest_build 派生同步。
+    """收尾：log/index、派生同步及成功提交源文件的可重建指纹登记。
 
     config:
         doc_id_key: state 中的 ID 字段名
@@ -2060,7 +2214,8 @@ def step_finalize_tail(state: dict, REPO: Path, config: dict) -> tuple[bool, str
         build_entry: (ctx) -> str | None — 自定义 index 条目；None 则用默认格式
         skip_index: bool — True 时跳过 index.md 追加（re-ingest 等已有索引场景）
         frontier_capture: bool — 论文成功后限量捕获作者明示开放问题；失败仅 warning
-        frontier_answer: bool — 捕获后在当前 WikiGraph 内非阻断尝试回答；默认 True
+        frontier_answer: bool — API 捕获后非阻断尝试回答；Agent 始终由宿主按需回答
+        fingerprint_artifact: (state, REPO) -> {source_path,text_path,source_kind}
     """
     import graph_lib as gl
     today = datetime.now().strftime("%Y-%m-%d")
@@ -2122,20 +2277,60 @@ def step_finalize_tail(state: dict, REPO: Path, config: dict) -> tuple[bool, str
         run([sys.executable, str(REPO / ".scripts/ingest_build.py"), "--catalog"], REPO)
     except Exception as exc:
         return False, "ingest_build.py 失败: " + str(exc)
-    # 4. Frontier 候选捕获：独立于 ingest 事务，只抓作者明示问题/局限/future work。
+    # 4. 指纹是 Raw 派生缓存；登记失败不回滚已验证的事实提交。
+    fingerprint_artifact = config.get("fingerprint_artifact")
+    if fingerprint_artifact:
+        state["quality_warnings"] = [
+            warning for warning in state.get("quality_warnings", [])
+            if not (isinstance(warning, dict)
+                    and warning.get("issue") == "fingerprint_register_failed")
+        ]
+        try:
+            artifact = fingerprint_artifact(state, REPO)
+            source_path = Path(artifact["source_path"]).resolve()
+            relative = source_path.relative_to(REPO.resolve())
+            if len(relative.parts) < 3 or relative.parts[1] != "raw":
+                raise ValueError("fingerprint source must be a managed Raw artifact")
+            text_path = artifact.get("text_path")
+            state["source_fingerprint"] = sf.register_source(
+                source_path,
+                text_path=Path(text_path) if text_path else None,
+                source_kind=str(artifact.get("source_kind") or ""),
+                repo=REPO,
+            )
+        except Exception as exc:
+            state.setdefault("quality_warnings", []).append({
+                "issue": "fingerprint_register_failed", "detail": str(exc),
+            })
+    # 5. Frontier 候选捕获：独立于 ingest 事务，只抓作者明示问题/局限/future work。
     # 失败不得让事实摄入回滚或失败。
     if config.get("frontier_capture") and wiki_page:
+        backend = str(
+            (state.get("agent_workspace") or {}).get("execution_backend")
+            or state.get("semantic_backend") or agent_task.ingest_backend()
+        )
         cmd = [sys.executable, str(REPO / ".scripts/frontier.py"),
                "capture-paper", wiki_page, "--limit", str(config.get("frontier_capture_limit", 3))]
-        if not config.get("frontier_answer", True):
+        if state.get("transaction_id"):
+            cmd.extend(["--transaction-id", state["transaction_id"]])
+        if backend == "agent" or not config.get("frontier_answer", True):
             cmd.append("--no-answer")
         started = time.monotonic()
-        result = subprocess.run(cmd, cwd=REPO, text=True, capture_output=True)
+        result = subprocess.run(
+            cmd, cwd=REPO, text=True, capture_output=True,
+            env={**os.environ, "QUERY_BACKEND": backend},
+        )
         record_subprocess(state, "frontier_capture", cmd, result.returncode,
                           int((time.monotonic() - started) * 1000))
         if result.returncode == 0:
             try:
-                state["frontier_capture"] = json.loads(result.stdout)
+                state["frontier_capture"] = {
+                    **json.loads(result.stdout), "backend": backend,
+                    "answer_policy": (
+                        "host_agent" if backend == "agent" else
+                        "api" if config.get("frontier_answer", True) else "disabled"
+                    ),
+                }
             except json.JSONDecodeError:
                 state["frontier_capture"] = {"status": "degraded", "error": "非 JSON 输出"}
         else:

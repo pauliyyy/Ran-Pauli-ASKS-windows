@@ -169,11 +169,21 @@ def test_new_research_project_uses_shared_workspace_kernel():
             project = projects / "demo"
             config = state.load_workspace_config(project)
             assert config["profile"] == "research"
+            schema = research_project.load_yaml(project / "schema.yaml")
+            assert schema["project"]["id"] == "demo"
+            assert schema["project"]["name"] == "Demo"
+            assert schema["project"]["topic"] == "共享内核验证"
+            assert schema["project"]["stage"] == "experiment"
+            assert schema["compute"]["policy"] == "server_preferred"
+            assert schema["compute"]["backend"] == "ssh"
+            assert schema["artifact_policy"]["all_products_inside_project"] is True
+            assert (project / "outputs").is_dir()
+            assert "{{PROJECT_" not in (project / "README.md").read_text(encoding="utf-8")
             assert state.load_profile(project)["topic"] == "共享内核验证"
             items = state.load_items(project)
             assert len(items) == 1 and items[0][0]["state"] == "active"
             assert research_project.validate_project(SimpleNamespace(
-                project="demo", strict=False,
+                project="demo", strict=True,
             )) == 0
         finally:
             research_project.PROJECTS_DIR, research_project.TEMPLATE_DIR = originals[:2]

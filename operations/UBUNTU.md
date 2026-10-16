@@ -7,14 +7,14 @@
 ## 支持基线
 
 - Ubuntu 22.04 及其后续版本；版本判断以运行能力而不是发行版名称硬编码。
-- Python 3.10 或更高版本。Ubuntu 22.04、24.04、26.04 的默认 Python 分别落在
-  本项目的 3.10+ 语法基线内。
+- Python 3.12 或更高版本，与上游 `pyproject.toml` 的包契约一致。Ubuntu 22.04
+  默认解释器较旧时须独立安装 Python 3.12，不替换系统 Python；先确认所选解释器版本。
 - 仓库路径必须位于 Linux 文件系统或提供完整 POSIX 文件语义的挂载点；脚本不依赖
   macOS 大小写不敏感文件系统。
 - 桌面程序、远程模型和可选提取后端可以缺席；对应工作流必须明确报告缺少的工具，
   不能把未执行伪装为成功。
 
-更老的 Ubuntu 只有在另行提供 Python 3.10+ 和下列同名系统工具时才属于支持范围。
+更老的 Ubuntu 只有在另行提供 Python 3.12+ 和下列同名系统工具时才属于支持范围。
 不要为了兼容旧解释器改写或删除知识库能力。
 
 ## 安装
@@ -36,22 +36,32 @@ Tesseract 只服务已有的可编辑 PPT 重建 OCR；Noto CJK 字体降低不�
 的中文换行差异；`xdg-open`、`gio` 分别提供桌面打开和 Freedesktop 回收站接口。
 无桌面的服务器仍可生成文件，`--open` 只会给出提示，不影响生成结果。
 
-在仓库根目录创建隔离环境：
+首选使用上游提交的 `pyproject.toml` 与 `uv.lock` 建立冻结环境。先按上游
+README 准备 `uv`，并确保已有 Python 3.12，或明确允许 `uv` 安装该解释器。
+完整功能验收环境可安装全部能力 extras：
 
 ```bash
-python3 -m venv .venv
+uv sync --frozen --python 3.12 --extra release --extra pdf --extra office --extra analysis --extra visual
+uv run ran-asks doctor
+uv run ran-asks demo
+```
+
+默认 core、分项能力 extras 与统一测试入口仍按上游 README 使用。
+需要 Linux 共享依赖清单的宿主也可在仓库根目录创建 Python 3.12 隔离环境：
+
+```bash
+python3.12 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install --upgrade pip
 python3 -m pip install -r requirements.txt
 python3 .scripts/ubuntu_preflight.py --python-only --strict
-cp .env.example .env
 ```
 
 `requirements.txt` 包含共享运行时和仓库回归所需 Python 包。只有显式选择本地
 Docling 后端时才创建脚本约定的独立环境：
 
 ```bash
-python3 -m venv .venv-docling
+python3.12 -m venv .venv-docling
 .venv-docling/bin/python -m pip install --upgrade pip
 .venv-docling/bin/python -m pip install \
   torch torchvision --index-url https://download.pytorch.org/whl/cpu
@@ -63,7 +73,8 @@ python3 .scripts/ubuntu_preflight.py --docling --strict
 额外安装 CUDA 运行时。确需 NVIDIA GPU 时，按 PyTorch 官方安装矩阵替换该行，
 再安装 `requirements-docling.txt`；不要在同一环境混装 CPU 与 CUDA wheel。
 
-需要远程模型的工作流再配置 `.env`；本地结构校验不需要 API key。
+只有所选工作流需要远程模型或远程提取后端时，才执行 `cp .env.example .env`
+并配置对应变量；本地结构校验不需要 API key，环境变量或 token 不构成外发授权。
 
 ## 平台行为
 
@@ -112,3 +123,7 @@ python3 .scripts/engineering_graph.py validate
 宿主验收。平台 smoke 使用自动清理的系统临时目录；两者均不写 Raw、Wiki 或
 `graph.db`。图校验继续经受管 Python 入口执行；不得用不存在的路径启动裸
 `sqlite3`。
+
+## 锁定的 Linux 补充依赖
+
+在上游 `uv sync --frozen --all-extras` 之后执行 `uv pip install --python .venv/bin/python -r requirements-linux.txt`。补充文件只固定 Linux 回归仍使用、而上游锁文件未覆盖的 python-dotenv 和 xlwt；上游 uv.lock 原样保留。

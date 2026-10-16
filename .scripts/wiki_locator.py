@@ -28,6 +28,11 @@ RAW_PLACEHOLDER_RE = re.compile(
     re.M,
 )
 MAX_RAW_CITATION_CHARS = 8000
+PLACEHOLDER_CLAIM_RE = re.compile(
+    r"(?:结论|内容|信息|证据|详情)?(?:仍)?待(?:巩固|补充)"
+    r"|暂无(?:结论|内容|信息|证据)",
+)
+PLACEHOLDER_TOKEN_RE = re.compile(r"(?:tbd|todo|unknown)", re.I)
 
 
 def semantic_overlap_tokens(value: str) -> set[str]:
@@ -88,6 +93,71 @@ def _frontmatter_end(lines: list[str]) -> int:
     return 0
 
 
+def normalize_raw_footnote_locator(value: str) -> str:
+    """Unwrap one unambiguous Markdown wrapper without changing the address.
+
+    Aliases, nested wrappers, inline commentary and non-Raw links stay untouched
+    so the ordinary evidence validator can reject them. This is not resolution.
+    """
+    locator = value.strip()
+    for opening, closing in (("[[", "]]"), ("`", "`"), ("<", ">")):
+        if not (locator.startswith(opening) and locator.endswith(closing)):
+            continue
+        inner = locator[len(opening):-len(closing)].strip()
+        path, fragment = raw_locator.split_locator(inner)
+        if (path and "/raw/" in f"/{path}" and fragment
+                and not any(char in inner for char in "`[]<>|\r\n")):
+            return inner
+        break
+    return locator
+
+
+def normalize_raw_footnotes(text: str, *, reuse_inline: bool = False) -> str:
+    """Canonicalize definitions and optionally reuse exact inline Raw citations."""
+    def replace(match):
+        value = match.group("locator")
+        normalized = normalize_raw_footnote_locator(value)
+        if normalized == value.strip():
+            return match.group(0)
+        return f"[^{match.group('id')}]: {normalized}"
+
+    normalized = re.sub(FOOTNOTE_DEF_RE.pattern, replace, text, flags=re.M)
+    if not reuse_inline:
+        return normalized
+    lines = normalized.splitlines(keepends=True)
+    definitions, duplicates = _footnote_definitions(lines)
+    if duplicates:
+        return normalized
+    citations = {}
+    for footnote_id, locator in definitions.items():
+        raw_path, fragment = raw_locator.split_locator(locator)
+        if "/raw/" in f"/{raw_path}" and re.fullmatch(r"L[1-9]\d*(?:-L[1-9]\d*)?", fragment):
+            citations.setdefault(locator, footnote_id)
+    if not citations:
+        return normalized
+    addresses = "|".join(re.escape(locator) for locator in sorted(citations, key=len, reverse=True))
+    inline_pattern = re.compile(r"(?<![\w/`\[\(<\"'])" + f"(?:{addresses})" + r"(?![\w/#-]|\.[\w])")
+    frontmatter_end = _frontmatter_end([line.rstrip("\r\n") for line in lines])
+    fence_marker = ""
+    for index, line in enumerate(lines):
+        if index < frontmatter_end:
+            continue
+        fence = re.match(r"^[ \t]{0,3}(`{3,}|~{3,})", line)
+        if fence:
+            marker = fence.group(1)
+            if not fence_marker:
+                fence_marker = marker
+            elif (marker[0] == fence_marker[0] and len(marker) >= len(fence_marker)
+                  and not line[fence.end():].strip()):
+                fence_marker = ""
+            continue
+        if (fence_marker or FOOTNOTE_DEF_RE.fullmatch(line.strip())
+                or HEADING_RE.fullmatch(line.strip()) or "`" in line or "[[" in line or "](" in line):
+            continue
+        lines[index] = inline_pattern.sub(lambda match: f"[^{citations[match.group(0)]}]", line)
+    return "".join(lines)
+
+
 def _footnote_definitions(lines: list[str]) -> tuple[dict[str, str], list[str]]:
     definitions: dict[str, str] = {}
     duplicates: list[str] = []
@@ -99,10 +169,7 @@ def _footnote_definitions(lines: list[str]) -> tuple[dict[str, str], list[str]]:
         if footnote_id in definitions:
             duplicates.append(footnote_id)
         else:
-            locator = match.group("locator").strip()
-            if locator.startswith("<") and locator.endswith(">"):
-                locator = locator[1:-1].strip()
-            definitions[footnote_id] = locator
+            definitions[footnote_id] = normalize_raw_footnote_locator(match.group("locator"))
     return definitions, duplicates
 
 
@@ -176,7 +243,7 @@ def read_wiki_locator(value: str, section: str = "") -> dict:
     if item is None:
         available = [entry.slug for entry in parse_wiki_page(target)[0]]
         raise KeyError(f"section '{wanted}' 不存在；可用: {', '.join(available)}")
-    rel = str(target.resolve().relative_to(REPO.resolve()))
+    rel = target.resolve().relative_to(REPO.resolve()).as_posix()
     return {
         "page": rel,
         "section": item.slug,
@@ -187,7 +254,8 @@ def read_wiki_locator(value: str, section: str = "") -> dict:
 
 
 def validate_wiki_page(path: Path | str, *, require_citations: bool = False,
-                       raw_overrides: dict[str, Path | str] | None = None) -> list[str]:
+                       raw_overrides: dict[str, Path | str] | None = None,
+                       base_path: Path | str | None = None) -> list[str]:
     """Run the closed-loop checks required by the Wiki→Raw locator contract."""
     target = Path(path)
     text = target.read_text(encoding="utf-8", errors="replace")
@@ -231,7 +299,7 @@ def validate_wiki_page(path: Path | str, *, require_citations: bool = False,
         if not raw_path or "/raw/" not in f"/{raw_path}" or not fragment or fragment == "全篇":
             errors.append(f"脚注 [^{footnote_id}] 不是精确 Raw locator: {locator or '<empty>'}")
             continue
-        resolved = overrides.get(raw_path) or raw_locator.resolve_path(raw_path, target)
+        resolved = overrides.get(raw_path) or raw_locator.resolve_path(raw_path, base_path or target)
         if resolved is None or not Path(resolved).is_file():
             errors.append(f"脚注 [^{footnote_id}] Raw 路径不存在: {raw_path}")
             continue
@@ -244,6 +312,41 @@ def validate_wiki_page(path: Path | str, *, require_citations: bool = False,
             errors.append(f"脚注 [^{footnote_id}] locator 读取为空: {locator}")
         elif len(excerpt) > MAX_RAW_CITATION_CHARS:
             errors.append(f"脚注 [^{footnote_id}] locator 范围过大({len(excerpt)}字符): {locator}")
+    return errors
+
+
+def validate_claim_sections(path: Path | str, section_names: tuple[str, ...]) -> list[str]:
+    """Reject mechanically empty or explicit placeholder claims.
+
+    This is deliberately not an entailment check. It only prevents a citation or
+    known placeholder token from masquerading as substantive Wiki prose.
+    """
+    target = Path(path)
+    sections, _definitions = parse_wiki_page(target)
+    by_slug = {item.slug: item for item in sections}
+    errors: list[str] = []
+    for name in section_names:
+        section = by_slug.get(heading_slug(name))
+        if section is None:
+            continue
+        body_lines = []
+        for line in section.text.splitlines()[1:]:
+            stripped = line.strip()
+            if not stripped or HEADING_RE.fullmatch(stripped) or FOOTNOTE_DEF_RE.fullmatch(stripped):
+                continue
+            body_lines.append(stripped)
+        body = "\n".join(body_lines)
+        without_citations = FOOTNOTE_REF_RE.sub("", body)
+        visible = re.sub(r"[\s`*_>#\[\](){}:;,.!?，。；：！？、\-]+", "", without_citations)
+        if not re.search(r"[A-Za-z0-9\u3400-\u9fff]", visible):
+            errors.append(f"{section.title} 只有脚注或格式标记，没有实质陈述")
+        token_lines = [
+            re.sub(r"[\s`*_>#\[\](){}:;,.!?，。；：！？、\-]+", "", line)
+            for line in without_citations.splitlines()
+        ]
+        if (PLACEHOLDER_CLAIM_RE.search(without_citations)
+                or any(PLACEHOLDER_TOKEN_RE.fullmatch(line) for line in token_lines)):
+            errors.append(f"{section.title} 含明确占位陈述")
     return errors
 
 
@@ -279,7 +382,7 @@ def graph_wiki_source(path: Path | str, *terms: str) -> tuple[str, list[str]] | 
     item = best_cited_section(target, *terms)
     if item is None:
         return "", []
-    rel = str(target.resolve().relative_to(REPO.resolve())).removesuffix(".md")
+    rel = target.resolve().relative_to(REPO.resolve()).as_posix().removesuffix(".md")
     return f"{rel}#{item.slug}", list(item.raw_citations)
 
 

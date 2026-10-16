@@ -437,6 +437,22 @@ def test_profiles():
     assert mixed["profiles"] == ["enumeration", "relation", "traceability"]
 
 
+def test_task_driven_query_clues_and_audited_feedback():
+    start = json.loads(run(
+        "python3", ".scripts/route.py", "--task", "query", "--query", "撤系建院经费报告",
+        "--format", "json",
+    ).stdout)
+    assert "从用户目标提取核心事项" in start["prompt"]
+    assert "title/aliases 无命中不等于正文无资料" in start["prompt"]
+    answer = json.loads(run(
+        "python3", ".scripts/route.py", "--task", "query", "--query-stage", "answer",
+        "--format", "json",
+    ).stdout)
+    assert "不以关键词出现触发写入" in answer["prompt"]
+    assert "先修责任组件" in answer["prompt"]
+    assert "回放原查询" in answer["prompt"]
+
+
 def test_query_stage_dispatch():
     start = json.loads(run(
         "python3", ".scripts/route.py", "--task", "query", "--query", "关系如何", "--format", "json"
@@ -476,6 +492,68 @@ def test_query_stage_dispatch():
         assert "执行纪律（使用任务）" not in stage_card["prompt"]
         assert "任务执行边界（ingest/query）" not in stage_card["prompt"]
         assert "轻量经验层（事件触发）" not in stage_card["prompt"]
+
+
+def test_private_query_uses_shared_stages_and_explicit_local_scope():
+    env = os.environ.copy()
+    env['QUERY_BACKEND'] = 'api'
+    for stage, marker in [('start', '个人资料'), ('evidence', '来源与论证分层'),
+                          ('continue', '关键前提尚未查证'), ('answer', '适用前提和本次推断')]:
+        result = subprocess.run(
+            ['python3', '.scripts/route.py', '--task', 'query', '--subproject', 'private',
+             '--query-stage', stage, '--format', 'json'], cwd=REPO, env=env,
+            capture_output=True, text=True, check=True)
+        payload = json.loads(result.stdout)
+        assert payload['stage'] == stage
+        assert payload['query_scope']['db'] == 'private/graph.db'
+        assert payload['query_scope']['log'].startswith('private/outputs/')
+        assert payload['query_scope']['workspace'].startswith('private/outputs/')
+        assert payload['query_scope']['local_only'] is True
+        assert payload['backend'] == 'agent'
+        assert payload['backend_notice'] == ''
+        assert marker in payload['prompt']
+        assert '--subproject private' in payload['prompt']
+        if stage != 'start':
+            assert '工程上下文(按元图派发)' not in payload['prompt']
+    invalid = subprocess.run(
+        ['python3', '.scripts/route.py', '--task', 'query', '--subproject', 'typo'],
+        cwd=REPO, capture_output=True, text=True)
+    assert invalid.returncode != 0
+
+
+def test_private_metaphysics_topic_dispatch_and_followups():
+    def routed(*extra):
+        return json.loads(run('python3', '.scripts/route.py', '--task', 'query',
+                              '--format', 'json', *extra).stdout)
+
+    first = routed('--subproject', 'private', '--query', '通过八字分析摆件选择')
+    assert first['query_topic'] == 'metaphysics'
+    assert '结合自身知识与 private 知识库' in first['prompt']
+    assert '库内没有现成结论时仍可给出有理由的判断' in first['prompt']
+    assert '个人事实和声称出自某文献的内容仍须回溯来源' in first['prompt']
+    for stage in ('evidence', 'continue', 'answer'):
+        followup = routed('--subproject', 'private', '--query', '那选哪个？',
+                          '--query-topic', first['query_topic'], '--query-stage', stage)
+        assert followup['query_topic'] == 'metaphysics'
+        assert followup['query_scope'] == first['query_scope']
+        assert followup['backend'] == 'agent'
+        has_guidance = '职责是结合自身知识与 private 知识库' in followup['prompt']
+        assert has_guidance == (stage == 'answer')
+        assert '工程上下文(按元图派发)' not in followup['prompt']
+    for extra in [('--query', '八字命理资料'),
+                  ('--subproject', 'private', '--query', '最近的检验报告'),
+                  ('--subproject', 'private', '--query', '五行资料有几篇', '--query-topic', 'general')]:
+        other = routed(*extra)
+        assert other['query_topic'] == 'general'
+        assert '职责是结合自身知识与 private 知识库' not in other['prompt']
+    private_full = routed('--subproject', 'private', '--query-topic', 'metaphysics', '--full')
+    assert private_full['query_topic'] == 'metaphysics'
+    for task, scope in [('query', 'public'), ('lint', 'private')]:
+        invalid = subprocess.run(
+            ['python3', '.scripts/route.py', '--task', task, '--subproject', scope,
+             '--query-topic', 'metaphysics'], cwd=REPO, capture_output=True, text=True)
+        assert invalid.returncode != 0
+        assert 'query-topic' in invalid.stderr
 
 
 def test_lightweight_session_plan_contract():
@@ -531,6 +609,137 @@ def test_ingest_dispatch_parameter_contract():
     assert "不能派发论文模板" in bad.stderr
 
 
+def test_paper_update_dispatch_keeps_local_changes_out_of_full_compilation():
+    for backend in ("agent", "api"):
+        env = dict(os.environ, INGEST_BACKEND=backend)
+        command = [
+            "python3", ".scripts/route.py", "--task", "ingest",
+            "--subproject", "academic", "--mode", "update",
+            "--content", "paper", "--source-kind", "ordinary",
+        ]
+        warmup = subprocess.run(
+            [*command, "--context-warmup", "--format", "json"],
+            cwd=REPO, capture_output=True, text=True, check=True, env=env,
+        )
+        payload = json.loads(warmup.stdout)
+        assert "--mode update" in payload["entrypoint"]
+        assert "--context-warmup" not in payload["entrypoint"]
+        assert "wg.py ingest" not in payload["entrypoint"]
+        assert "局部" in payload["focus"]
+        assert payload["backend"] == backend
+        assert len(warmup.stdout) < 1800
+        routed = subprocess.run(command, cwd=REPO, capture_output=True,
+                                text=True, check=True, env=env)
+        assert "增量" in routed.stderr
+        assert "re_ingest.py --raw" in routed.stderr
+        assert "ingest_paper.py --raw" not in routed.stderr
+        assert "更新模式 — 执行步骤" in routed.stdout
+
+
+def test_ingest_context_warmup_is_compact_complete_and_profiled():
+    env = os.environ.copy()
+    env["INGEST_BACKEND"] = "agent"
+    command = [
+        "python3", ".scripts/route.py", "--task", "ingest",
+        "--subproject", "academic", "--mode", "create",
+        "--content", "paper", "--source-kind", "ordinary", "--stage", "1",
+        "--context-warmup", "--format", "json",
+    ]
+    first = subprocess.run(
+        command, cwd=REPO, capture_output=True, text=True, check=True, env=env,
+    )
+    second = subprocess.run(
+        command, cwd=REPO, capture_output=True, text=True, check=True, env=env,
+    )
+    payload = json.loads(first.stdout)
+    assert payload["schema"] == "ingest-context-warmup-v1"
+    assert payload["warmed"] is True
+    assert payload["receipt"] == json.loads(second.stdout)["receipt"]
+    assert payload["context_scope"] == "current_conversation"
+    assert payload["scope"] == {
+        "subproject": "academic", "mode": "create", "content": "paper",
+        "source_kind": "ordinary", "stage": 1,
+    }
+    assert payload["flow"] == "paper"
+    assert payload["backend"] == "agent"
+    assert payload["control_owner"] == "host_agent"
+    assert "wg.py ingest <file> --subproject academic" in payload["entrypoint"]
+    assert "awaiting_agent(if required)" in payload["state_machine"]
+    rules = "\n".join(payload["rules"])
+    for required in (
+        "Raw 只经受管摄入事务写入", "temp、Agent task 与 session log 不是事实源",
+        "agent-task-v1", "workflow_status=completed 且 committed=true",
+        "不为熟悉流程预读完整 INGEST、SCHEMA 或脚本源码",
+    ):
+        assert required in rules
+    assert "同一对话上下文后续摄入" in payload["repeat_policy"]
+    assert "工程上下文(按元图派发)" not in first.stdout
+    assert "operations/INGEST.md#" not in first.stdout
+    assert len(first.stdout) < 1800, len(first.stdout)
+
+    meeting = subprocess.run(
+        [
+            "python3", ".scripts/route.py", "--task", "ingest",
+            "--subproject", "admin", "--mode", "create", "--content", "other",
+            "--source-kind", "meeting", "--stage", "1", "--context-warmup",
+            "--format", "json",
+        ],
+        cwd=REPO, capture_output=True, text=True, check=True, env=env,
+    )
+    meeting_payload = json.loads(meeting.stdout)
+    assert meeting_payload["flow"] == "meeting"
+    assert meeting_payload["entrypoint"].endswith("--subproject admin")
+    assert meeting_payload["receipt"] != payload["receipt"]
+
+    document_payload = json.loads(subprocess.run(
+        [
+            "python3", ".scripts/route.py", "--task", "ingest",
+            "--subproject", "teaching", "--mode", "create", "--content", "other",
+            "--source-kind", "ordinary", "--stage", "1", "--context-warmup",
+            "--format", "json",
+        ],
+        cwd=REPO, capture_output=True, text=True, check=True, env=env,
+    ).stdout)
+    assert document_payload["flow"] == "document"
+    assert document_payload["entrypoint"].endswith("--subproject teaching")
+    assert document_payload["receipt"] not in {
+        payload["receipt"], meeting_payload["receipt"],
+    }
+
+    api_env = dict(env)
+    api_env["INGEST_BACKEND"] = "api"
+    api_payload = json.loads(subprocess.run(
+        command, cwd=REPO, capture_output=True, text=True, check=True, env=api_env,
+    ).stdout)
+    assert api_payload["backend"] == "api"
+    assert api_payload["control_owner"] == "program"
+    assert api_payload["receipt"] != payload["receipt"]
+
+    private_warmup = subprocess.run(
+        [
+            "python3", ".scripts/route.py", "--task", "ingest",
+            "--subproject", "private", "--mode", "create", "--content", "other",
+            "--source-kind", "ordinary", "--stage", "1", "--context-warmup",
+            "--format", "json",
+        ],
+        cwd=REPO, capture_output=True, text=True, env=api_env,
+    )
+    assert private_warmup.returncode != 0
+    assert "仅覆盖公共域摄入，不适用于 private" in private_warmup.stderr
+
+    invalid = subprocess.run(
+        ["python3", ".scripts/route.py", "--task", "query", "--context-warmup"],
+        cwd=REPO, capture_output=True, text=True,
+    )
+    assert invalid.returncode != 0
+    assert "仅适用于 --task ingest" in invalid.stderr
+
+    agents = (REPO / "AGENTS.md").read_text(encoding="utf-8")
+    assert "ingest-context-warmup-v1" in agents
+    assert "同一上下文后续摄入、batch item、stage 切换与 resume 不重复预热" in agents
+    assert "private 不执行该预热" in agents
+
+
 def test_task_specific_execution_guidance_is_dispatched():
     ingest = run(
         "python3", ".scripts/route.py", "--task", "ingest", "--subproject", "academic", "--stage", "1",
@@ -547,13 +756,17 @@ def test_task_specific_execution_guidance_is_dispatched():
 
 def test_state_capability_tool_dispatch_is_explicit():
     listing = run("python3", ".scripts/route.py", "--list").stdout
-    assert "可用 task/state（write 为兼容别名）:" in listing
-    assert "[compat -> capability write/general]" in listing
-    assert "可用 capability:" in listing
-    assert "write: profiles=academic,general" in listing
+    assert "工作状态:" in listing
+    assert "research: 研究工作 route=research" in listing
+    assert "可路由任务:" in listing
+    assert "按需能力:" in listing
+    assert "write: artifact.write profiles=academic,general" in listing
+    assert "兼容 task 别名:" in listing
+    assert "write: artifact.write -> write/general" in listing
+    assert "task/state" not in listing
 
     research = run("python3", ".scripts/route.py", "--task", "research").stdout
-    assert "research 是持续状态，write 是按需能力" in research
+    assert "research 是工作状态，write 是按需能力" in research
     assert "--capability write --capability-profile academic" in research
 
     academic_write = run(
@@ -606,6 +819,34 @@ def test_engineering_graph():
     for task in ("sync", "write", "scan", "inbox"):
         routed = run("python3", ".scripts/route.py", "--task", task)
         assert "工程上下文(按元图派发)" in routed.stdout
+
+
+def test_engineering_graph_on_demand_coverage():
+    if str(REPO / ".scripts") not in sys.path:
+        sys.path.insert(0, str(REPO / ".scripts"))
+    import engineering_graph as graph
+    import function_registry
+
+    contracts = [{"checks": ["function_registry_coverage"]}]
+    registered = {"research": {"entry": "route"}, "slides": {"entry": "route"}}
+    with patch.object(function_registry, "validate_runtime", return_value=[]), \
+         patch.object(
+             function_registry,
+             "registered_route_surface",
+             return_value=({"research"}, {"slides"}),
+         ):
+        assert graph.contract_failures({}, registered, contracts) == []
+        missing_task = graph.contract_failures({}, {"slides": {"entry": "route"}}, contracts)
+        assert any("Route task missing capability" in error for error in missing_task)
+        missing_cap = graph.contract_failures({}, {"research": {"entry": "route"}}, contracts)
+        assert any("on-demand route missing capability" in error for error in missing_cap)
+        extra = graph.contract_failures({}, {**registered, "orphan": {"entry": "route"}}, contracts)
+        assert any("missing registered Route binding" in error for error in extra)
+        bad_entry = graph.contract_failures({}, {**registered, "slides": {"entry": "other"}}, contracts)
+        assert any("entry is not route" in error for error in bad_entry)
+    tasks, on_demand = function_registry.registered_route_surface()
+    assert "presentation" in on_demand
+    assert "presentation" not in tasks
 
 
 def test_engineering_graph_target_resolution():
@@ -726,10 +967,14 @@ def test_ingest_route_guardrails():
          "--content", "paper", "--stage", "1"),
         cwd=REPO, capture_output=True, text=True, env=api_env,
     )
-    # API 后端路由断言：ingest_paper.py --raw 代码驱动流水线（已替代旧 api_ingest.py 证据卡路径）
-    assert "ingest_paper.py --raw" in api_routed.stderr
-    assert "INGEST_BACKEND=api" in api_routed.stderr
-    assert "代码驱动" in api_routed.stderr
+    # API 与 Agent 共用输入分流；新文件和已归档 Raw 的整篇编译入口各自明确。
+    assert api_routed.returncode == 0
+    assert "wg.py ingest <file>" in api_routed.stderr
+    assert "re_ingest.py --raw" in api_routed.stderr
+    assert "ingest_paper.py --raw" not in api_routed.stderr
+    assert "[ingest 后端]" in api_routed.stderr
+    assert "LLM=API" in api_routed.stderr
+    assert "API 由对应 adapter 执行" in api_routed.stderr
     batch_routed = run(
         "python3", ".scripts/route.py", "--task", "ingest", "--subproject", "academic",
         "--mode", "batch", "--content", "paper",
@@ -792,6 +1037,54 @@ def test_audited_prompt_currency_regressions():
     assert "relations --predicate 合作者" not in query
     assert "人 → 作者 → 论文/专利 ← 作者 ← 人" in query
     assert "graph_build.py" not in query_graph
+
+
+def test_build_principles_quality_efficiency_and_planning():
+    build = run("python3", ".scripts/route.py", "--task", "build").stdout
+    agents = (REPO / "AGENTS.md").read_text(encoding="utf-8")
+    conventions = (REPO / "operations/shared-conventions.md").read_text(encoding="utf-8")
+    assert "最小方案不等于最优方案" in build
+    assert "高质量、高效率" in build
+    assert "对复杂建设先制定计划，再实施" in build
+    assert "目标与验收标准、影响边界与后端归属、阶段与依赖、风险及回归验证" in build
+    assert "质量与效率优先" in agents
+    assert "复杂建设先计划" in agents
+    assert "最小方案不等于最优方案" in conventions
+    assert "复杂建设先计划" in conventions
+    assert "质量与可靠性是约束" in conventions
+    assert "优先实际效果、最小机制" not in build
+    assert "最小机制(不重复造轮子 + 奥卡姆)" not in conventions
+    assert len(build) < 1800, len(build)
+
+
+def test_paper_guidance_locators_are_bounded_and_complete():
+    import engineering_locator
+
+    prefix = "md:wikiran-代码调用指南/2-摄入工作流原料-wiki-图/"
+    main_locator = prefix + "21c-代码驱动论文摄入scriptsingestpaperpy"
+    bibliography_locator = prefix + "21c1-论文书目取证与候选目录"
+    primary = engineering_locator.read_engineering_locator(
+        "operations/engineering/code-guidance.md#" + main_locator,
+    )
+    bibliography = engineering_locator.read_engineering_locator(
+        "operations/engineering/code-guidance.md#" + bibliography_locator,
+    )
+    assert primary["ok"], primary
+    assert bibliography["ok"], bibliography
+    assert primary["content_chars"] <= engineering_locator.DEFAULT_MAX_CHARS
+    assert bibliography["content_chars"] <= engineering_locator.DEFAULT_MAX_CHARS
+    assert bibliography_locator in primary["content"]
+    assert "--agent-workspace" in primary["content"]
+    assert "双后端恢复" in primary["content"]
+    for required in (
+        "书目协议诊断", "近端 venue", "Agent task 不接收候选目录",
+        "模板族与 API 输入表示", "完整逐人作者仅在 PDF", "书目快速路径与幂等缓存",
+        "论文 META 归属", "锁定书目回填", "书目候选边界与观测",
+    ):
+        assert required in bibliography["content"], required
+    assert (REPO / "operations/engineering/code-guidance.md").read_bytes() == (
+        REPO / "operations/engineering/open-source-assets/code-guidance.md"
+    ).read_bytes()
 
 
 def test_use_task_execution_discipline():
@@ -940,14 +1233,20 @@ if __name__ == "__main__":
     test_runtime_prompt_surface_boundaries()
     test_incremental_prompt_map_cache()
     test_profiles()
+    test_task_driven_query_clues_and_audited_feedback()
     test_query_stage_dispatch()
+    test_private_query_uses_shared_stages_and_explicit_local_scope()
+    test_private_metaphysics_topic_dispatch_and_followups()
     test_lightweight_session_plan_contract()
     test_non_agent_backend_notices_every_stage()
     test_ingest_dispatch_parameter_contract()
+    test_ingest_context_warmup_is_compact_complete_and_profiled()
+    test_paper_update_dispatch_keeps_local_changes_out_of_full_compilation()
     test_task_specific_execution_guidance_is_dispatched()
     test_state_capability_tool_dispatch_is_explicit()
     test_query_stage_dispatch()
     test_engineering_graph()
+    test_engineering_graph_on_demand_coverage()
     test_engineering_graph_target_resolution()
     test_meeting_workflow_documentation()
     test_inbox_single_read_documentation()
@@ -955,6 +1254,8 @@ if __name__ == "__main__":
     test_ingest_route_guardrails()
     test_ingest_minimal_domain_dispatch()
     test_audited_prompt_currency_regressions()
+    test_build_principles_quality_efficiency_and_planning()
+    test_paper_guidance_locators_are_bounded_and_complete()
     test_use_task_execution_discipline()
     test_trace_rules()
     print("prompt audit regression: PASS")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 import sys
 
 REPO = Path(__file__).resolve().parent.parent
@@ -215,7 +216,8 @@ def test_ingest_accepts_only_validator_passed_proposal():
             def validate(_state):
                 return (hard, []) if "实验/结果" in semantic.read_text(encoding="utf-8") else ([], [])
 
-            ok, message = ic.try_semantic_recovery(state, root, hard, [], validate)
+            with patch.object(ic.agent_task, "ingest_backend", return_value="api"):
+                ok, message = ic.try_semantic_recovery(state, root, hard, [], validate)
         finally:
             sra.SemanticRecoveryAgent = old_agent
         assert ok, message
@@ -260,9 +262,10 @@ def test_ingest_restores_rejected_candidate():
         old_agent = sra.SemanticRecoveryAgent
         sra.SemanticRecoveryAgent = FakeAgent
         try:
-            ok, _message = ic.try_semantic_recovery(
-                state, root, hard, [], lambda _state: (["仍非法"], []),
-            )
+            with patch.object(ic.agent_task, "ingest_backend", return_value="api"):
+                ok, _message = ic.try_semantic_recovery(
+                    state, root, hard, [], lambda _state: (["仍非法"], []),
+                )
         finally:
             sra.SemanticRecoveryAgent = old_agent
         assert not ok
@@ -341,7 +344,23 @@ def test_eval_routing_policy_allows_no_fallback_and_excludes_gpt():
             sre.MODEL_CATALOG = original_catalog
 
 
+def test_agent_backend_prepares_host_task_without_api_worker():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        semantic = root / "temp/inbox-state/semantic.txt"
+        semantic.parent.mkdir(parents=True)
+        original = "三元组:\n本文 | 实验/结果 | 纠缠熵增长\n"
+        semantic.write_text(original, encoding="utf-8")
+        state = {"transaction_id": "txn-agent-boundary", "semantic_path": "temp/inbox-state/semantic.txt", "extract_dir": "temp/inbox-state", "wiki_content": "wiki"}
+        with patch.object(ic.agent_task, "ingest_backend", return_value="agent"), patch.object(sra, "SemanticRecoveryAgent") as worker:
+            ok, message = ic.try_semantic_recovery(state, root, ["谓词格式不合法: 实验/结果 (主体=本文, 客体=纠缠熵增长)"], [], lambda _state: ([], []))
+        assert not ok and message == "Agent task prepared"
+        worker.assert_not_called()
+        assert semantic.read_text(encoding="utf-8") == original
+
+
 if __name__ == "__main__":
+    test_agent_backend_prepares_host_task_without_api_worker()
     test_proposal_is_returned_without_write_tools()
     test_duplicate_tool_action_stops_immediately()
     test_attempted_fallback_models_are_traced()

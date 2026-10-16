@@ -103,6 +103,27 @@ def test_decomposed_method_alias_does_not_reuse_longer_compound_concept():
     assert result["decision"] != "resolved", result
 
 
+def test_named_framework_does_not_reuse_generic_component():
+    for mention in ("OSPREY框架", "SPARK框架", "框架framework(OSPREY)"):
+        conn = make_db()
+        add_node(conn, "generic", "框架")
+        gl.insert_aliases(conn, "generic", ["framework"])
+        result = ns.resolve_node(conn, mention, node_types=["entity"])
+        assert result["decision"] == "unmatched", (mention, result)
+
+
+def test_named_framework_reuses_specific_abbreviation_after_generic_filter():
+    conn = make_db()
+    add_node(conn, "generic", "框架")
+    add_node(conn, "osprey", "OSPREY")
+    add_node(conn, "spark", "SPARK")
+    for mention, expected in (("OSPREY框架", "osprey"), ("SPARK框架", "spark")):
+        result = ns.resolve_node(conn, mention, node_types=["entity"])
+        assert result["decision"] == "resolved", result
+        assert result["node_id"] == expected, result
+    assert ns.resolve_node(conn, "框架")["node_id"] == "generic"
+
+
 def test_full_method_name_reuses_variant_with_optional_trailing_acronym():
     conn = make_db()
     add_node(conn, "simple-update", "简单更新simple update(SU)")
@@ -305,6 +326,38 @@ def test_embedding_failure_degrades_to_lexical_search():
     assert result["candidates"][0]["node_id"] == "mps"
 
 
+def test_persisted_distinction_blocks_alias_and_embedding_identity_reuse():
+    conn = make_db()
+    add_node(conn, "tensor-network", "张量网络", "张量表示方法")
+    gl.insert_aliases(conn, "tensor-network", ["谱张量网络"])
+    assert ns.record_identity_distinction(
+        conn,
+        "谱张量网络",
+        "张量网络",
+        source="user:2026-10-06",
+        reason="用户明确要求保持不同概念",
+    )
+    assert ns.record_identity_distinction(
+        conn,
+        "张量网络",
+        "谱张量网络",
+        source="user:2026-10-06",
+        reason="幂等更新",
+    )
+    assert conn.execute("SELECT COUNT(*) FROM identity_distinctions").fetchone()[0] == 1
+    old_queries = ns._embed_queries
+    ns._embed_queries = lambda _texts: (_ for _ in ()).throw(
+        AssertionError("persisted distinction must run before embeddings")
+    )
+    try:
+        result = ns.resolve_node(conn, "谱张量网络")
+    finally:
+        ns._embed_queries = old_queries
+    assert result["decision"] == "unmatched"
+    assert result["reason"] == "persisted_distinct"
+    assert result["allowed_actions"] == ["create_local"]
+
+
 def test_dsh_registers_semantic_capabilities_not_raw_embedding_tools():
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from dsh.tools import build_tools
@@ -325,7 +378,7 @@ def test_dsh_prompt_explains_semantic_tool_arguments():
     from dsh.agent_loop import AgentLoop
     prompt = AgentLoop()._build_prompt("查找张量网络", 1, [])
     assert "node_resolve(name*, context, node_types, topk)" in prompt
-    assert "semantic_search(query*, scope, topk)" in prompt
+    assert "semantic_search(query*, scope, topk, include_deprecated)" in prompt
     assert "hub_route(page*, topk)" in prompt
     assert "hub_inspect(hub*)" in prompt
     assert "read_engineering" not in prompt
@@ -344,7 +397,10 @@ def test_query_actions_expose_structured_semantic_tools():
         conn.commit()
         conn.close()
         old_connect = qa.gl.connect
-        qa.gl.connect = lambda: old_connect(db_path)
+        def connect_fixture(path=None, *, read_only=False):
+            assert read_only, "query actions must use a read-only graph connection"
+            return old_connect(db_path, read_only=True)
+        qa.gl.connect = connect_fixture
         try:
             resolved = qa.execute("node_resolve", {"name": "MPS"})
         finally:
@@ -356,6 +412,66 @@ def test_query_actions_expose_structured_semantic_tools():
     assert "node_resolve" in qa.DISPATCH
     assert "semantic_search" in qa.DISPATCH
     assert "read_engineering" not in qa.DISPATCH
+
+
+def test_ensure_node_preserves_omitted_status_and_allows_explicit_transition():
+    conn = make_db()
+    add_node(conn, "page", "Page", node_type="page")
+    assert conn.execute("SELECT status FROM nodes WHERE path='page'").fetchone()["status"] == "current"
+    gl.ensure_node(conn, "page", "Page", "page", status="deprecated")
+    gl.insert_aliases(conn, "page", ["Old label"])
+    gl.ensure_node(conn, "page", "Page", "page")
+    assert conn.execute("SELECT status FROM nodes WHERE path='page'").fetchone()["status"] == "deprecated"
+    assert conn.execute("SELECT alias FROM aliases WHERE node_path='page'").fetchone()["alias"] == "Old label"
+    gl.ensure_node(conn, "page", "Page", "page", status="active")
+    assert conn.execute("SELECT status FROM nodes WHERE path='page'").fetchone()["status"] == "active"
+    conn.close()
+
+
+def test_semantic_page_filter_precedes_embedding_and_topk():
+    conn = make_db()
+    gl.ensure_node(conn, "academic/wiki/papers/a-old", "Shared", "page", status="deprecated")
+    gl.ensure_node(conn, "academic/wiki/papers/z-current", "Shared overview", "page")
+    original_rank = ns._rank_with_embeddings
+    observed = []
+
+    def rank(query, context, rows):
+        observed.append([item["node_id"] for item in rows])
+        return [{**item, "semantic_score": 1.0} for item in rows], "synthetic"
+
+    ns._rank_with_embeddings = rank
+    try:
+        result = ns.semantic_search(conn, "Shared", top_k=1)
+        assert observed[-1] == ["academic/wiki/papers/z-current"]
+        assert result["candidates"][0]["node_id"] == "academic/wiki/papers/z-current"
+        history = ns.semantic_search(conn, "Shared", top_k=1, include_deprecated=True)
+        assert "academic/wiki/papers/a-old" in observed[-1]
+        assert history["candidates"][0]["status"] == "deprecated"
+        try:
+            ns.semantic_search(conn, "Shared", include_deprecated="false")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("semantic core accepted non-boolean history flag")
+    finally:
+        ns._rank_with_embeddings = original_rank
+        conn.close()
+
+
+def test_semantic_lexical_degradation_keeps_version_filter():
+    conn = make_db()
+    gl.ensure_node(conn, "academic/wiki/papers/old", "UniqueOldLabel", "page", status="deprecated")
+    original_queries = ns._embed_queries
+    ns._embed_queries = lambda texts: None
+    try:
+        default = ns.semantic_search(conn, "UniqueOldLabel")
+        assert default["candidates"] == [] and default["include_deprecated"] is False
+        history = ns.semantic_search(conn, "UniqueOldLabel", include_deprecated=True)
+        assert history["mode"] == "lexical_degraded"
+        assert history["candidates"][0]["node_id"] == "academic/wiki/papers/old"
+    finally:
+        ns._embed_queries = original_queries
+        conn.close()
 
 
 def main():

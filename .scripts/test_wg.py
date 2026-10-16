@@ -104,26 +104,315 @@ def test_collect_sources_skips_missing_source():
     assert module.collect_sources_from_edges(obj) == ["a#nav"]
 
 
+def test_wiki_claim_sections_reject_citation_only_and_placeholders():
+    import wiki_locator as wl
+    citation_only = setup_temp_file(
+        "citation-only-claim",
+        "## 研究方向定位\n\n[^r1]\n\n## Content\n\n结论待巩固。[^r1]\n",
+    )
+    errors = wl.validate_claim_sections(
+        citation_only, ("研究方向定位", "Content"))
+    assert any("只有脚注" in error for error in errors), errors
+    assert any("占位陈述" in error for error in errors), errors
+
+
+def test_wiki_claim_sections_accept_substantive_cited_prose():
+    import wiki_locator as wl
+    page = setup_temp_file(
+        "substantive-claim",
+        "## 研究方向定位\n\n论文研究离子选择性传输。[^r1]\n\n"
+        "## Content\n\n### 结论\n\n实验观察到稳定的渗透能输出。[^r1]\n",
+    )
+    assert wl.validate_claim_sections(page, ("研究方向定位", "Content")) == []
+
+
 # ============ build_parser ============
+
+def test_hybrid_wrapper_forwards_explicit_history_flag():
+    calls = []
+    original = module.qa.hybrid_recall
+    module.qa.hybrid_recall = lambda *args, **kwargs: (calls.append((args, kwargs)) or ('{"candidates": []}', 0))
+    try:
+        args = module.build_parser().parse_args(["hybrid-recall", "old", "--include-deprecated"])
+        result = capture_call(module.cmd_hybrid_recall, args)
+    finally:
+        module.qa.hybrid_recall = original
+    assert result["ok"] is True
+    assert calls[0][1]["include_deprecated"] is True
+
+
+def test_lookup_and_abbr_forward_history_and_keep_navigation_role():
+    calls = []
+    original = module.query_graph_json
+    module.query_graph_json = lambda *args, **kwargs: (calls.append(args) or {"nodes": [
+        {"path": "academic/wiki/papers/old", "material_role": "historical_navigation", "default_page_candidate": False}]})
+    try:
+        for command, handler in (("lookup", module.cmd_lookup), ("abbr", module.cmd_abbr)):
+            args = module.build_parser().parse_args([command, "old", "--include-deprecated"])
+            result = capture_call(handler, args)
+            assert result["ok"] is True
+            hits = result["result"] if command == "lookup" else result["result"]["matches"]
+            assert hits[0]["default_page_candidate"] is False
+            assert calls[-1][2] == ["--include-deprecated"]
+            assert module.build_parser().parse_args([command, "old"]).include_deprecated is False
+    finally:
+        module.query_graph_json = original
+
 
 def test_parser_has_all_subcommands():
     """横向能力全部注册。"""
     ap = module.build_parser()
+    assert ap.parse_args(["hybrid-recall", "old"]).include_deprecated is False
+    assert ap.parse_args(["hybrid-recall", "old", "--include-deprecated"]).include_deprecated is True
     subactions = {a.option_strings[0].lstrip("-") if a.option_strings else a.dest
                   for a in ap._subparsers._actions
                   if hasattr(a, "choices") and a.choices}
     # 子命令名在 choices
     for cmd in ("lookup", "neighbors", "relations", "hub-of", "read-section",
                 "read-raw", "recall", "remember", "workspace", "abbr", "frontier",
-                "ingest"):
+                "ingest", "task", "cv", "code-library", "code-run"):
         assert cmd in _subcommand_names(ap), f"缺子命令 {cmd}"
+
+
+def test_task_inspect_reports_missing_outputs_without_running_action():
+    state = {"status": "prepared", "transaction_id": "txn", "agent_task": {
+        "schema": "agent-task-v1", "status": "prepared", "kind": "demo",
+        "transaction_id": "txn", "inputs": [], "outputs": [],
+        "protocol": {"name": "demo-v1"}, "issues": [],
+        "commands": {"resume": "python3 .scripts/demo.py --resume txn"},
+        "context": {},
+    }}
+    original_load = module.inbox_state.load
+    original_view = module.agent_task.control_view
+    module.inbox_state.load = lambda _txn: state
+    module.agent_task.control_view = lambda _state, _repo: {
+        "workflow_status": "awaiting_agent", "internal_status": "prepared",
+        "next_action": "write_outputs", "missing_outputs": ["temp/demo/result.json"],
+        "task": state["agent_task"],
+    }
+    try:
+        args = type("A", (), {
+            "transaction_id": "txn", "task_action": "inspect", "task_command": "read",
+        })()
+        result = capture_call(module.cmd_task, args)
+    finally:
+        module.inbox_state.load = original_load
+        module.agent_task.control_view = original_view
+    assert result["ok"] is True
+    assert result["result"]["next_action"] == "write_outputs"
+
+
+def test_task_status_and_next_are_read_only_for_any_ingest_transaction():
+    state = {"status": "preprocess", "transaction_id": "txn", "errors": []}
+    original_load = module.inbox_state.load
+    module.inbox_state.load = lambda _txn: state
+    try:
+        status_args = type("A", (), {
+            "transaction_id": "txn", "task_action": "status", "task_command": "read",
+        })()
+        status = capture_call(module.cmd_task, status_args)
+        next_args = type("A", (), {
+            "transaction_id": "txn", "task_action": "next", "task_command": "read",
+        })()
+        next_result = capture_call(module.cmd_task, next_args)
+    finally:
+        module.inbox_state.load = original_load
+    assert status["result"]["schema"] == "ingest-operation-view-v1"
+    assert status["result"]["internal_status"] == "preprocess"
+    assert next_result["result"] == {
+        "schema": "ingest-next-action-v1",
+        "transaction_id": "txn",
+        "workflow_status": "awaiting_agent",
+        "internal_status": "preprocess",
+        "next_action": "resume",
+        "allowed_actions": [],
+        "artifact_refs": {},
+    }
+    assert state == {"status": "preprocess", "transaction_id": "txn", "errors": []}
+
+
+def test_task_verify_reports_pass_incomplete_and_mismatch():
+    original_load = module.inbox_state.load
+    original_verify = module.inbox_state.verify_receipt
+    try:
+        module.inbox_state.load = lambda _txn: {
+            "status": "completed", "transaction_id": "txn", "errors": [],
+        }
+        for receipt_status, expected_outer, expected_ok in (
+            ("PASS", "ok", True),
+            ("INCOMPLETE", "empty", False),
+            ("FAILED", "error", False),
+        ):
+            module.inbox_state.verify_receipt = lambda *_args, value=receipt_status: {
+                "schema": "verification-receipt-v1", "status": value,
+            }
+            args = type("A", (), {
+                "transaction_id": "txn", "task_action": "verify", "task_command": "read",
+            })()
+            result = capture_call(module.cmd_task, args)
+            assert result["status"] == expected_outer
+            assert result["ok"] is expected_ok
+    finally:
+        module.inbox_state.load = original_load
+        module.inbox_state.verify_receipt = original_verify
+
+
+def test_task_advance_checks_before_commit():
+    state = {"status": "prepared", "transaction_id": "txn", "agent_task": {
+        "schema": "agent-task-v1", "status": "prepared", "kind": "demo",
+        "transaction_id": "txn", "inputs": [], "outputs": [],
+        "protocol": {"name": "demo-v1"}, "issues": [],
+        "commands": {"check": "check", "commit": "commit"}, "context": {},
+    }}
+    calls = []
+    original_load = module.inbox_state.load
+    original_view = module.agent_task.control_view
+    original_run = module._run_task_action
+    module.inbox_state.load = lambda _txn: state
+    module.agent_task.control_view = lambda _state, _repo: {
+        "workflow_status": "awaiting_agent", "internal_status": "prepared",
+        "next_action": "advance", "missing_outputs": [], "task": state["agent_task"],
+    }
+    module._run_task_action = lambda _state, action: (
+        calls.append(action) or {
+            "action": action, "returncode": 0, "command": [action],
+            "environment_overrides": [], "error": "",
+            "result": ({"status": "ready_to_commit", "workflow_status": "ready_to_commit"}
+                       if action == "check" else {"status": "completed"}),
+        }
+    )
+    try:
+        args = type("A", (), {
+            "transaction_id": "txn", "task_action": "advance", "task_command": "read",
+        })()
+        result = capture_call(module.cmd_task, args)
+    finally:
+        module.inbox_state.load = original_load
+        module.agent_task.control_view = original_view
+        module._run_task_action = original_run
+    assert result["ok"] is True
+    assert calls == ["check", "commit"]
+    assert [item["action"] for item in result["result"]["executions"]] == calls
+
+
+def test_task_advance_stops_after_rejected_check():
+    state = {"status": "prepared", "transaction_id": "txn", "agent_task": {
+        "schema": "agent-task-v1", "status": "prepared", "kind": "demo",
+        "transaction_id": "txn", "inputs": [], "outputs": [],
+        "protocol": {"name": "demo-v1"}, "issues": [],
+        "commands": {"check": "check", "commit": "commit"}, "context": {},
+    }}
+    calls = []
+    original_load = module.inbox_state.load
+    original_view = module.agent_task.control_view
+    original_run = module._run_task_action
+    module.inbox_state.load = lambda _txn: state
+    module.agent_task.control_view = lambda _state, _repo: {
+        "workflow_status": "awaiting_agent", "internal_status": "prepared",
+        "next_action": "advance", "missing_outputs": [], "task": state["agent_task"],
+    }
+    module._run_task_action = lambda _state, action: (
+        calls.append(action) or {
+            "action": action, "returncode": 0, "command": [action],
+            "environment_overrides": [], "error": "",
+            "result": {"status": "validation_error", "errors": ["bad output"]},
+        }
+    )
+    try:
+        args = type("A", (), {
+            "transaction_id": "txn", "task_action": "advance", "task_command": "read",
+        })()
+        result = capture_call(module.cmd_task, args)
+    finally:
+        module.inbox_state.load = original_load
+        module.agent_task.control_view = original_view
+        module._run_task_action = original_run
+    assert calls == ["check"]
+    assert result["result"]["next_action"] == "repair_outputs"
+
+
+def test_task_advance_requires_declared_outputs_before_running_action():
+    state = {"status": "prepared", "transaction_id": "txn", "agent_task": {
+        "schema": "agent-task-v1", "status": "prepared", "kind": "demo",
+        "transaction_id": "txn", "inputs": [], "outputs": [],
+        "protocol": {"name": "demo-v1"}, "issues": [],
+        "commands": {"resume": "resume"}, "context": {},
+    }}
+    calls = []
+    original_load = module.inbox_state.load
+    original_view = module.agent_task.control_view
+    original_run = module._run_task_action
+    module.inbox_state.load = lambda _txn: state
+    module.agent_task.control_view = lambda _state, _repo: {
+        "workflow_status": "awaiting_agent", "internal_status": "prepared",
+        "next_action": "write_outputs", "missing_outputs": ["temp/demo/result.json"],
+        "task": state["agent_task"],
+    }
+    module._run_task_action = lambda _state, action: calls.append(action)
+    try:
+        args = type("A", (), {
+            "transaction_id": "txn", "task_action": "advance", "task_command": "read",
+        })()
+        result = capture_call(module.cmd_task, args)
+    finally:
+        module.inbox_state.load = original_load
+        module.agent_task.control_view = original_view
+        module._run_task_action = original_run
+    assert result["ok"] is False
+    assert result["status"] == "empty"
+    assert calls == []
+
+
+def test_cv_wrapper_preserves_json_and_failure_status():
+    calls = []
+    original = module.run_script
+    module.run_script = lambda command, **_kwargs: (
+        calls.append(command) or (1, json.dumps({
+            "schema": "cv-function-result-v1", "kind": "validate",
+            "status": "blocked", "error": "formal CV validation failed",
+        }), "")
+    )
+    try:
+        args = type("Args", (), {"cv_args": ["validate", "academic-full-en"]})()
+        result = capture_call(module.cmd_cv, args)
+    finally:
+        module.run_script = original
+    assert calls[0][1].endswith(".scripts/cv.py")
+    assert result["ok"] is False
+    assert result["status"] == "error"
+    assert result["result"]["output"]["status"] == "blocked"
+
+
+def test_code_run_wrapper_preserves_failed_validation_and_local_evidence_role():
+    calls = []
+    original = module.run_script
+    module.run_script = lambda command, **_kwargs: (
+        calls.append(command) or (1, json.dumps({
+            "schema": "scientific-run-result-v1", "ok": False, "status": "failed",
+            "validation": {"passed": False}, "scientific_status": "local_check_not_paper_reproduction",
+            "error": "", "sources": ["not-a-raw-source"],
+        }), "")
+    )
+    try:
+        args = module.build_parser().parse_args([
+            "code-run", "tt-gradient-check", "--project", "test-project", "--seed", "41",
+        ])
+        result = capture_call(module.cmd_code_run, args)
+    finally:
+        module.run_script = original
+    assert calls[0][1].endswith(".scripts/code_run.py")
+    assert calls[0][2:] == args.run_args
+    assert result["ok"] is False and result["status"] == "error"
+    assert result["sources"] == []
+    assert result["result"]["status"] == "failed"
+    assert result["result"]["validation"]["passed"] is False
 
 
 def test_ingest_wrapper_routes_external_file_and_resume_through_inbox():
     calls = []
     original = module.run_script
     module.run_script = lambda command, **_kwargs: (
-        calls.append(command) or (0, json.dumps({"status": "prepared",
+        calls.append(command) or (0, json.dumps({"status": "completed",
                                                 "transaction_id": "txn"}), "")
     )
     try:
@@ -147,6 +436,26 @@ def test_ingest_wrapper_routes_external_file_and_resume_through_inbox():
         module.run_script = original
 
 
+def test_ingest_wrapper_rejects_noncompleted_inner_status_even_with_zero_exit():
+    original = module.run_script
+    module.run_script = lambda *_args, **_kwargs: (
+        0, json.dumps({"status": "agent_required", "transaction_id": "txn"}), ""
+    )
+    try:
+        args = type("A", (), {
+            "file": "/tmp/external.pdf", "resume": "", "name": "paper.pdf",
+            "subproject": "academic", "document_type": "", "ocr_result": "",
+            "allow_remote_ocr": False,
+        })()
+        result = capture_call(module.cmd_ingest, args)
+        assert result["ok"] is False
+        assert result["status"] == "error"
+        assert result["result"]["status"] == "agent_required"
+        assert "agent_required" in result["error"]
+    finally:
+        module.run_script = original
+
+
 def _subcommand_names(ap):
     for a in ap._actions:
         if hasattr(a, "choices") and a.choices:
@@ -165,6 +474,20 @@ def test_parser_defaults():
     assert ns.section == ""
     ns = ap.parse_args(["workspace", "recall", "role/nested"])
     assert ns.workspace_args == ["recall", "role/nested"]
+
+
+def test_neighbors_budget_forwarding():
+    from unittest.mock import patch
+    args = module.build_parser().parse_args([
+        "neighbors", "somepage", "--max-nodes", "15", "--max-edges", "20",
+        "--max-scanned-rows", "60", "--top-k", "4",
+    ])
+    with patch.object(module, "query_graph_json", return_value={"nodes": [], "edges": [], "truncated": True}) as query:
+        result = capture_call(module.cmd_neighbors, args)
+    assert result["data"]["truncated"] is True
+    assert query.call_args.args == ("neighbors", ["somepage"], [
+        "--depth", "2", "--max-nodes", "15", "--max-edges", "20", "--max-scanned-rows", "60", "--top-k", "4",
+    ])
 
 
 # ============ Wiki section locator + Raw footnotes ============
@@ -204,6 +527,7 @@ def test_wiki_locator_reads_one_section_and_raw_citations():
                          })())
         assert d["ok"] is True
         assert d["result"]["section"] == "retrieval-control"
+        assert "\\" not in d["result"]["page"]
         assert "Stop rule" in d["result"]["text"]
         assert "不应进入上一节" not in d["result"]["text"]
         assert d["result"]["raw_citations"][0].endswith("#L3")
@@ -222,6 +546,57 @@ def test_wiki_locator_minimal_validation():
         errors = module.wl.validate_wiki_page(wiki, require_citations=True)
         assert any("heading slug 重复" in error for error in errors)
         assert any("脚注未定义" in error for error in errors)
+    finally:
+        cleanup()
+
+
+def test_inline_raw_citation_reuse_preserves_prose_and_protected_markup():
+    address = "academic/raw/references/demo/paper.md#L11"
+    longer = "academic/raw/references/demo/paper.md#L136"
+    unknown = "academic/raw/references/demo/paper.md#L110"
+    text = (
+        f'---\nsources:\n  - "{address}"\n---\n'
+        f"## 研究方向定位\n\n贝尔不等式的经典界 {address}。\n"
+        f"\n## Content\n\n保留条件 {longer}，未知地址 {unknown}。\n"
+        f"\n`{address}`\n[证据]({address})\n[[{address}]]\n"
+        f"\n```text\n{address}\n~~~\n{address}\n```\n"
+        f"\n## Sources\n\n[^r1]: {address}\n[^r2]: {longer}\n"
+    )
+    expected = text.replace(f"经典界 {address}。", "经典界 [^r1]。")
+    expected = expected.replace(f"保留条件 {longer}，", "保留条件 [^r2]，")
+    assert module.wl.normalize_raw_footnotes(text) == text
+    normalized = module.wl.normalize_raw_footnotes(text, reuse_inline=True)
+    assert normalized == expected
+    assert module.wl.normalize_raw_footnotes(normalized, reuse_inline=True) == expected
+    sections, definitions = module.wl.parse_wiki_text(normalized)
+    assert sections[0].raw_citations == (address,)
+    assert definitions == {"r1": address, "r2": longer}
+    duplicate = text + f"[^r1]: {unknown}\n"
+    assert module.wl.normalize_raw_footnotes(duplicate, reuse_inline=True) == duplicate
+
+
+def test_raw_footnote_wrappers_preserve_evidence_and_query_locators():
+    raw, wiki = setup_locator_wiki()
+    try:
+        original = wiki.read_text(encoding="utf-8")
+        address = str(raw.relative_to(REPO)) + "#L3"
+        for wrapped in (f"[[{address}]]", f"`{address}`", f"<{address}>"):
+            text = original.replace(address, wrapped)
+            wiki.write_text(text, encoding="utf-8")
+            assert module.wl.validate_wiki_page(wiki, require_citations=True) == []
+            section = module.wl.get_wiki_section(wiki, "retrieval-control")
+            assert section.raw_citations[0] == address
+            assert module.wl.normalize_raw_footnotes(text) == original
+        assert module.wl.normalize_raw_footnotes(original) == original
+        for invalid in (
+            f"[[{address}|label]]", f"`[[{address}]]`", f"[[{address}]] trailing",
+            f"[[{address.replace('#L3', '#L99')}]]",
+            f"`{address.replace('document.md', 'missing.md')}`",
+        ):
+            wiki.write_text(original.replace(address, invalid), encoding="utf-8")
+            assert module.wl.validate_wiki_page(wiki, require_citations=True), invalid
+        wiki.write_text(original + f"[^r1]: `{'missing/raw/file.md#L1'}`\n", encoding="utf-8")
+        assert any("脚注定义重复" in error for error in module.wl.validate_wiki_page(wiki))
     finally:
         cleanup()
 
@@ -246,6 +621,7 @@ def test_wiki_graph_source_points_to_cited_section():
     try:
         source, evidence = module.wl.graph_wiki_source(wiki, "证据缺口")
         assert source.endswith("/wiki/page#retrieval-control")
+        assert "\\" not in source
         assert evidence and evidence[0].endswith("#L3")
     finally:
         cleanup()
@@ -506,7 +882,7 @@ def test_read_raw_oversized_locator_requires_refinement():
 
 
 def test_read_raw_pdf_page_native():
-    """有文本层 PDF 使用原始页码 locator，不需要 Markdown companion。"""
+    """历史 PDF 没有 companion 时仍可回退原生页码 locator。"""
     import fitz
     TEMP_TEST_DIR.mkdir(parents=True, exist_ok=True)
     p = TEMP_TEST_DIR / "native_pages.pdf"
@@ -522,6 +898,130 @@ def test_read_raw_pdf_page_native():
         assert d["ok"] is True
         assert "second page" in d["result"]["text"]
         assert "first page" not in d["result"]["text"]
+    finally:
+        cleanup()
+
+
+def test_read_raw_pdf_prefers_paginated_companion():
+    """有 companion 的 PDF 从 Markdown 读取，但引用来源保持为 PDF。"""
+    import fitz
+    TEMP_TEST_DIR.mkdir(parents=True, exist_ok=True)
+    original = TEMP_TEST_DIR / "managed_pages.pdf"
+    companion = TEMP_TEST_DIR / "managed_pages.md"
+    document = fitz.open()
+    document.new_page().insert_text((72, 72), "native first")
+    document.new_page().insert_text((72, 72), "native second")
+    document.save(str(original))
+    document.close()
+    companion.write_text(
+        "# Managed pages\n\n## Page 1\n\nprojected first\n\n## Page 2\n\nprojected second\n",
+        encoding="utf-8",
+    )
+    record = module.sl.make_companion_record(
+        original, companion, generator={"name": "test", "version": "1"},
+        generated_at="2026-09-26T00:00:00+00:00", locator_scheme="page-heading",
+        method="test-projection", limitations=["synthetic fixture"],
+    )
+    original.with_name(original.name + ".source.json").write_text(
+        json.dumps({"schema": "document-source-context-v1", "companion": record}),
+        encoding="utf-8",
+    )
+    try:
+        original_rel = original.resolve().relative_to(REPO).as_posix()
+        companion_rel = companion.resolve().relative_to(REPO).as_posix()
+        result = capture_call(
+            module.cmd_read_raw,
+            type("A", (), {"locator": f"{original_rel}#page-2"})(),
+        )
+        assert result["ok"] is True
+        assert result["result"]["text"] == "projected second"
+        assert result["result"]["source_path"] == original_rel
+        assert result["result"]["read_path"] == companion_rel
+        assert result["result"]["companion_binding"]["status"] == "valid"
+        assert result["sources"] == [original_rel]
+        companion.write_text("tampered projection", encoding="utf-8")
+        rejected = capture_call(
+            module.cmd_read_raw,
+            type("A", (), {"locator": f"{original_rel}#page-2"})(),
+        )
+        assert rejected["ok"] is False
+        assert rejected["status"] == "error"
+        assert rejected["result"]["companion_binding"]["reason"] == "companion_hash_mismatch"
+        assert "text" not in rejected["result"]
+    finally:
+        cleanup()
+
+
+def test_read_raw_binary_uses_companion_and_cites_original():
+    """二进制原件可由同 stem companion 取证，但返回来源保持为原件。"""
+    TEMP_TEST_DIR.mkdir(parents=True, exist_ok=True)
+    original = TEMP_TEST_DIR / "managed_source.docx"
+    companion = TEMP_TEST_DIR / "managed_source.md"
+    original.write_bytes(b"synthetic docx fixture")
+    companion.write_text("alpha\nbeta evidence\ngamma\n", encoding="utf-8")
+    try:
+        original_rel = original.resolve().relative_to(REPO).as_posix()
+        companion_rel = companion.resolve().relative_to(REPO).as_posix()
+        from_original = capture_call(
+            module.cmd_read_raw,
+            type("A", (), {"locator": f"{original_rel}#L2"})(),
+        )
+        assert from_original["ok"] is True
+        assert from_original["result"]["text"] == "beta evidence"
+        assert from_original["result"]["source_path"] == original_rel
+        assert from_original["result"]["read_path"] == companion_rel
+        assert from_original["sources"] == [original_rel]
+
+        from_companion = capture_call(
+            module.cmd_read_raw,
+            type("A", (), {"locator": f"{companion_rel}#L2"})(),
+        )
+        assert from_companion["ok"] is True
+        assert from_companion["result"]["source_path"] == original_rel
+        assert from_companion["result"]["read_path"] == companion_rel
+        assert from_companion["sources"] == [original_rel]
+    finally:
+        cleanup()
+
+
+def test_read_raw_binary_without_companion_is_not_verified():
+    """无原生文本且无 companion 时不得把 locator 提示冒充已读证据。"""
+    TEMP_TEST_DIR.mkdir(parents=True, exist_ok=True)
+    original = TEMP_TEST_DIR / "unreadable_source.docx"
+    original.write_bytes(b"synthetic docx fixture")
+    try:
+        original_rel = original.resolve().relative_to(REPO).as_posix()
+        result = capture_call(
+            module.cmd_read_raw,
+            type("A", (), {"locator": f"{original_rel}#L1"})(),
+        )
+        assert result["ok"] is False
+        assert result["status"] == "empty"
+        assert "text" not in result["result"]
+    finally:
+        cleanup()
+
+
+def test_read_raw_text_image_uses_companion_without_decoding_image():
+    """文字图片查询只读 companion locator；原图可保持为不可解码测试字节。"""
+    TEMP_TEST_DIR.mkdir(parents=True, exist_ok=True)
+    original = TEMP_TEST_DIR / "text_image.png"
+    companion = TEMP_TEST_DIR / "text_image.md"
+    original.write_bytes(b"not a decodable image: read_raw must not open it")
+    companion.write_text("title\nform value: 42\nfooter\n", encoding="utf-8")
+    try:
+        original_rel = original.resolve().relative_to(REPO).as_posix()
+        companion_rel = companion.resolve().relative_to(REPO).as_posix()
+        result = capture_call(
+            module.cmd_read_raw,
+            type("A", (), {"locator": f"{original_rel}#L2"})(),
+        )
+        assert result["ok"] is True
+        assert result["result"]["text"] == "form value: 42"
+        assert result["result"]["source_path"] == original_rel
+        assert result["result"]["read_path"] == companion_rel
+        assert result["result"]["evidence_locator"] == f"{companion_rel}#L2"
+        assert result["sources"] == [original_rel]
     finally:
         cleanup()
 
@@ -553,10 +1053,22 @@ def main():
     test_collect_sources_empty()
     test_collect_sources_skips_missing_source()
     test_parser_has_all_subcommands()
+    test_hybrid_wrapper_forwards_explicit_history_flag()
+    test_lookup_and_abbr_forward_history_and_keep_navigation_role()
+    test_task_inspect_reports_missing_outputs_without_running_action()
+    test_task_status_and_next_are_read_only_for_any_ingest_transaction()
+    test_task_verify_reports_pass_incomplete_and_mismatch()
+    test_task_advance_checks_before_commit()
+    test_task_advance_stops_after_rejected_check()
+    test_task_advance_requires_declared_outputs_before_running_action()
+    test_cv_wrapper_preserves_json_and_failure_status()
     test_ingest_wrapper_routes_external_file_and_resume_through_inbox()
+    test_ingest_wrapper_rejects_noncompleted_inner_status_even_with_zero_exit()
     test_parser_defaults()
     test_wiki_locator_reads_one_section_and_raw_citations()
     test_wiki_locator_minimal_validation()
+    test_inline_raw_citation_reuse_preserves_prose_and_protected_markup()
+    test_raw_footnote_wrappers_preserve_evidence_and_query_locators()
     test_wiki_locator_rejects_raw_handle_and_truncated_footnote()
     test_wiki_graph_source_points_to_cited_section()
     test_wiki_graph_source_ranks_nonidentical_chinese_proposition_by_bigrams()
@@ -575,6 +1087,10 @@ def main():
     test_read_raw_explicit_fact_anchor_returns_only_bound_assertion()
     test_read_raw_oversized_locator_requires_refinement()
     test_read_raw_pdf_page_native()
+    test_read_raw_pdf_prefers_paginated_companion()
+    test_read_raw_binary_uses_companion_and_cites_original()
+    test_read_raw_binary_without_companion_is_not_verified()
+    test_read_raw_text_image_uses_companion_without_decoding_image()
     test_read_raw_unresolvable_path()
     test_main_unknown_command_errors()
     print("wg regression: PASS")

@@ -3,12 +3,30 @@
 import sys
 import tempfile
 import json
+import io
+import urllib.error
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
 import api_ingest
 import llm_structured
+
+
+def test_http_error_preserves_safe_provider_diagnostic():
+    error = urllib.error.HTTPError(
+        "https://provider.invalid/v1/chat/completions",
+        404,
+        "Not Found",
+        {},
+        io.BytesIO(json.dumps({
+            "error": {"code": "404", "message": "Invalid model. Error happened to model=GLM-5"}
+        }).encode("utf-8")),
+    )
+    retryable, label = llm_structured._classify_http_error(error)
+    assert retryable is False
+    assert "Invalid model" in label
+    assert "GLM-5" in label
 
 
 def isolated_call_json(*args, **kwargs):
@@ -21,6 +39,17 @@ def isolated_call_json(*args, **kwargs):
         llm_structured.EVENTS_DIR = original_events
 
 
+def test_request_timeout_configuration_is_bounded():
+    assert llm_structured.request_timeout_seconds({}, None, 90) == 90
+    assert llm_structured.request_timeout_seconds({"LLM_REQUEST_TIMEOUT_SEC": "180"}, None, 90) == 180
+    assert llm_structured.request_timeout_seconds({"LLM_REQUEST_TIMEOUT_SEC": "180"}, 45, 90) == 45
+    for value in ("29", "301", "invalid"):
+        try:
+            llm_structured.request_timeout_seconds({"LLM_REQUEST_TIMEOUT_SEC": value}, None, 90)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(f"invalid timeout accepted: {value}")
 def test_claim_validation_rejects_unquoted_claims():
     cards = [
         {"id": "E1", "raw_locator": "abstract", "evidence_quote": "FermiNet improves VMC accuracy."},
@@ -87,9 +116,11 @@ def test_overflow_claims_are_nonblocking_when_valid_claims_exist():
 
 
 def test_specialist_profiles_fall_back_to_primary_when_unconfigured():
-    config = {"LLM_API_BASE": "primary-base", "LLM_API_KEY": "primary-key", "LLM_MODEL": "DeepSeek-V3.2"}
+    config = {"LLM_API_BASE": "https://primary.example/v1", "LLM_API_KEY": "primary-key", "LLM_MODEL": "DeepSeek-V3.2"}
     assert llm_structured.api_profiles(config, "ingest_api_keywords") == [{
-        "name": "primary", "base": "primary-base", "key": "primary-key", "model": "DeepSeek-V3.2",
+        "name": "primary", "base": "https://primary.example/v1",
+        "endpoint": "https://primary.example/v1/chat/completions",
+        "key": "primary-key", "model": "DeepSeek-V3.2",
     }]
 
 
@@ -102,10 +133,21 @@ def test_env_reference_expansion_reuses_primary_credentials():
     assert expanded["INGEST_KEYWORD_API_KEY"] == "secret"
 
 
+def test_chat_endpoint_path_is_configurable_without_duplicate_v1():
+    assert llm_structured._chat_endpoint(
+        {}, "https://api.example/v1"
+    ) == "https://api.example/v1/chat/completions"
+    assert llm_structured._chat_endpoint({
+        "LLM_API_PATH": "/chat/completions",
+    }, "https://open.bigmodel.cn/api/paas/v4") == (
+        "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+    )
+
+
 def test_specialist_profiles_precede_primary_when_complete():
     config = {
-        "LLM_API_BASE": "primary-base", "LLM_API_KEY": "primary-key", "LLM_MODEL": "DeepSeek-V3.2",
-        "INGEST_KEYWORD_API_BASE": "minimax-base", "INGEST_KEYWORD_API_KEY": "minimax-key", "INGEST_KEYWORD_MODEL": "MiniMax-M3",
+        "LLM_API_BASE": "https://primary.example", "LLM_API_KEY": "primary-key", "LLM_MODEL": "DeepSeek-V3.2",
+        "INGEST_KEYWORD_API_BASE": "https://minimax.example", "INGEST_KEYWORD_API_KEY": "minimax-key", "INGEST_KEYWORD_MODEL": "MiniMax-M3",
     }
     profiles = llm_structured.api_profiles(config, "ingest_api_keywords")
     assert [profile["model"] for profile in profiles] == ["MiniMax-M3", "DeepSeek-V3.2"]
@@ -113,14 +155,14 @@ def test_specialist_profiles_precede_primary_when_complete():
 
 def test_proposition_profile_prefers_dedicated_then_generation_then_primary():
     config = {
-        "LLM_API_BASE": "primary-base", "LLM_API_KEY": "primary-key", "LLM_MODEL": "DeepSeek-V4-Flash-0731",
-        "INGEST_GENERATION_API_BASE": "generation-base", "INGEST_GENERATION_API_KEY": "generation-key",
+        "LLM_API_BASE": "https://primary.example", "LLM_API_KEY": "primary-key", "LLM_MODEL": "DeepSeek-V4-Flash-0731",
+        "INGEST_GENERATION_API_BASE": "https://generation.example", "INGEST_GENERATION_API_KEY": "generation-key",
         "INGEST_GENERATION_MODEL": "MiniMax-M3",
     }
     profiles = llm_structured.api_profiles(config, "ingest_proposition")
     assert [profile["model"] for profile in profiles] == ["MiniMax-M3", "DeepSeek-V4-Flash-0731"]
     config.update({
-        "INGEST_PROPOSITION_API_BASE": "proposition-base",
+        "INGEST_PROPOSITION_API_BASE": "https://proposition.example",
         "INGEST_PROPOSITION_API_KEY": "proposition-key",
         "INGEST_PROPOSITION_MODEL": "GLM-4.5-Flash",
     })
@@ -130,9 +172,95 @@ def test_proposition_profile_prefers_dedicated_then_generation_then_primary():
     ]
 
 
+def test_specialist_profile_identity_uses_normalized_endpoint_and_model():
+    config = {
+        "LLM_API_BASE": "https://primary.example/v1",
+        "LLM_API_PATH": "/chat/completions",
+        "LLM_API_KEY": "primary-key",
+        "LLM_MODEL": "shared-model",
+        "INGEST_PROPOSITION_API_BASE": "https://specialist.example",
+        "INGEST_PROPOSITION_API_PATH": "/v1/chat/completions",
+        "INGEST_PROPOSITION_API_KEY": "proposition-key",
+        "INGEST_PROPOSITION_MODEL": "shared-model",
+        "INGEST_GENERATION_API_BASE": "https://specialist.example/v1",
+        "INGEST_GENERATION_API_PATH": "/chat/completions",
+        "INGEST_GENERATION_API_KEY": "generation-key",
+        "INGEST_GENERATION_MODEL": "shared-model",
+    }
+    profiles = llm_structured.api_profiles(config, "ingest_proposition")
+    assert [profile["name"] for profile in profiles] == [
+        "ingest_proposition", "primary",
+    ]
+    assert [profile["endpoint"] for profile in profiles] == [
+        "https://specialist.example/v1/chat/completions",
+        "https://primary.example/v1/chat/completions",
+    ]
+
+
+def test_same_model_different_specialist_endpoints_are_called_in_order():
+    config = {
+        "INGEST_BACKEND": "api",
+        "LLM_API_BASE": "https://primary.example/v1",
+        "LLM_API_PATH": "/chat/completions",
+        "LLM_API_KEY": "primary-key",
+        "LLM_MODEL": "shared-model",
+        "INGEST_PROPOSITION_API_BASE": "https://roles.example",
+        "INGEST_PROPOSITION_API_PATH": "/proposition/chat/completions",
+        "INGEST_PROPOSITION_API_KEY": "proposition-key",
+        "INGEST_PROPOSITION_MODEL": "shared-model",
+        "INGEST_GENERATION_API_BASE": "https://roles.example",
+        "INGEST_GENERATION_API_PATH": "/generation/chat/completions",
+        "INGEST_GENERATION_API_KEY": "generation-key",
+        "INGEST_GENERATION_MODEL": "shared-model",
+    }
+    responses = iter([
+        {"choices": [{"message": {"content": '{"answer":1}'}, "finish_reason": "stop"}], "usage": {}},
+        {"choices": [{"message": {"content": '{"answer":2}'}, "finish_reason": "stop"}], "usage": {}},
+        {"choices": [{"message": {"content": '{"answer":3}'}, "finish_reason": "stop"}], "usage": {}},
+    ])
+    called_urls = []
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    def urlopen(request, **_kwargs):
+        called_urls.append(request.full_url)
+        return Response(next(responses))
+
+    original_load_env, original_urlopen = llm_structured.load_env, llm_structured.urllib.request.urlopen
+    llm_structured.load_env = lambda: config
+    llm_structured.urllib.request.urlopen = urlopen
+    try:
+        result = isolated_call_json(
+            "test", lambda obj: isinstance(obj, dict) and obj.get("answer") == 3,
+            retries=0, operation="ingest_proposition",
+        )
+    finally:
+        llm_structured.load_env, llm_structured.urllib.request.urlopen = original_load_env, original_urlopen
+    assert result["ok"] and result["fallback_used"]
+    assert called_urls == [
+        "https://roles.example/proposition/chat/completions",
+        "https://roles.example/generation/chat/completions",
+        "https://primary.example/v1/chat/completions",
+    ]
+    assert [item["profile"] for item in result["history"]] == [
+        "ingest_proposition", "ingest_generation", "primary",
+    ]
+
+
 def test_semantic_recovery_profile_is_optional_and_falls_back_to_primary():
     primary = {
-        "LLM_API_BASE": "primary-base", "LLM_API_KEY": "primary-key",
+        "LLM_API_BASE": "https://primary.example", "LLM_API_KEY": "primary-key",
         "LLM_MODEL": "GLM-5.3-Flash",
     }
     assert [profile["model"] for profile in llm_structured.api_profiles(
@@ -140,7 +268,7 @@ def test_semantic_recovery_profile_is_optional_and_falls_back_to_primary():
     )] == ["GLM-5.3-Flash"]
     configured = dict(primary)
     configured.update({
-        "SEMANTIC_RECOVERY_API_BASE": "agent-base",
+        "SEMANTIC_RECOVERY_API_BASE": "https://agent.example",
         "SEMANTIC_RECOVERY_API_KEY": "agent-key",
         "SEMANTIC_RECOVERY_MODEL": "AWS-GPT-5.6-Terra",
     })
@@ -347,6 +475,10 @@ def test_call_text_uses_supplied_conversation_messages():
         "LLM_API_BASE": "https://primary.example",
         "LLM_API_KEY": "primary-key",
         "LLM_MODEL": "DeepSeek-V3.2",
+        "INGEST_GENERATION_API_BASE": "https://generation.example/v2",
+        "INGEST_GENERATION_API_PATH": "/long-text/completions",
+        "INGEST_GENERATION_API_KEY": "generation-key",
+        "INGEST_GENERATION_MODEL": "Generation-Model",
     }
     captured = []
     logged = []
@@ -371,7 +503,7 @@ def test_call_text_uses_supplied_conversation_messages():
             return False
 
     def urlopen(request, **_kwargs):
-        captured.append(json.loads(request.data))
+        captured.append({"url": request.full_url, "payload": json.loads(request.data)})
         return Response()
 
     def log_event(operation, result, prompt, output_text="", transaction_id=""):
@@ -394,7 +526,8 @@ def test_call_text_uses_supplied_conversation_messages():
         llm_structured._log_event = original_log_event
 
     assert result["ok"]
-    assert captured[0]["messages"] == conversation
+    assert captured[0]["url"] == "https://generation.example/v2/long-text/completions"
+    assert captured[0]["payload"]["messages"] == conversation
     assert logged[-1][1] == json.dumps(conversation, ensure_ascii=False, sort_keys=True)
     assert logged[-1][3] == "txn-conversation"
 
@@ -566,6 +699,7 @@ def test_resolve_pending_appends_auditable_resolution():
 
 
 def main():
+    test_http_error_preserves_safe_provider_diagnostic()
     test_claim_validation_rejects_unquoted_claims()
     test_evidence_cards_are_program_owned()
     test_repair_schema_keeps_single_evidence_id()
@@ -574,8 +708,11 @@ def main():
     test_overflow_claims_are_nonblocking_when_valid_claims_exist()
     test_specialist_profiles_fall_back_to_primary_when_unconfigured()
     test_env_reference_expansion_reuses_primary_credentials()
+    test_chat_endpoint_path_is_configurable_without_duplicate_v1()
     test_specialist_profiles_precede_primary_when_complete()
     test_proposition_profile_prefers_dedicated_then_generation_then_primary()
+    test_specialist_profile_identity_uses_normalized_endpoint_and_model()
+    test_same_model_different_specialist_endpoints_are_called_in_order()
     test_semantic_recovery_profile_is_optional_and_falls_back_to_primary()
     test_reasoning_profile_mapping_and_validation()
     test_adaptive_reasoning_only_escalates_semantic_retry()

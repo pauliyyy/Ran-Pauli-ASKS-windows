@@ -380,6 +380,86 @@ def test_api_run_uses_dsh_loop_without_direct_dispatch():
             sys.modules["dsh.agent_loop"] = old_agent_loop
 
 
+def test_api_run_resumes_unique_same_source_transaction():
+    originals = (
+        module.REPO, module.INBOX, module.inbox_state.REPO,
+        module.sf.ensure_index, module.sf.lookup_exact,
+        module.agent_task.ingest_backend, module.subprocess.run,
+        module.run_post_ingest_maintenance, sys.argv,
+    )
+    old_agent_loop = sys.modules.get("dsh.agent_loop")
+    calls = []
+
+    class FakeSessionLog:
+        session_id = "resume-session"
+
+        @staticmethod
+        def append(*_args):
+            return None
+
+        @staticmethod
+        def to_jsonl():
+            return ""
+
+    class FakeLoop:
+        def __init__(self, mode):
+            self.session_log = FakeSessionLog()
+            self.last_structured = None
+
+        def execute(self, tool_name, tool_args):
+            calls.append((tool_name, tool_args))
+            self.last_structured = {
+                "status": "completed", "transaction_id": "existing-txn",
+                "admin_id": "notice",
+            }
+            return json.dumps(self.last_structured)
+
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inbox = root / "inbox"
+            inbox.mkdir()
+            source = inbox / "notice.md"
+            source.write_text("Routine administrative notice.\n", encoding="utf-8")
+            module.REPO = root
+            module.INBOX = inbox
+            module.inbox_state.REPO = root
+            module.inbox_state.save("existing-txn", {
+                "status": "extract", "source": "inbox/notice.md",
+                "pipeline_script": "ingest_document.py", "semantic_backend": "api",
+                "errors": [],
+            })
+            module.sf.ensure_index = lambda: None
+            module.sf.lookup_exact = lambda _path: None
+            module.agent_task.ingest_backend = lambda: "api"
+            module.subprocess.run = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("same-source API resume must use the DSH resume tool")
+            )
+            module.run_post_ingest_maintenance = lambda *_args: {"status": "no_action"}
+            fake_module = types.ModuleType("dsh.agent_loop")
+            fake_module.IngestAgentLoop = FakeLoop
+            sys.modules["dsh.agent_loop"] = fake_module
+            sys.argv = ["ingest_inbox.py", "--run", "--subproject", "admin"]
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                module.main()
+            payload = json.loads(stdout.getvalue().splitlines()[-1])
+            report = json.loads((root / payload["report_path"]).read_text(encoding="utf-8"))
+            assert calls == [("ingest_document_resume", {"txn": "existing-txn"})]
+            assert report["files"][0]["resumed_transaction"] == "existing-txn"
+    finally:
+        (
+            module.REPO, module.INBOX, module.inbox_state.REPO,
+            module.sf.ensure_index, module.sf.lookup_exact,
+            module.agent_task.ingest_backend, module.subprocess.run,
+            module.run_post_ingest_maintenance, sys.argv,
+        ) = originals
+        if old_agent_loop is None:
+            sys.modules.pop("dsh.agent_loop", None)
+        else:
+            sys.modules["dsh.agent_loop"] = old_agent_loop
+
+
 def test_agent_low_confidence_classification_is_one_batch_task():
     originals = (
         module.REPO, module.INBOX, module.sf.ensure_index, module.sf.lookup_exact,
@@ -432,6 +512,16 @@ def test_agent_low_confidence_classification_is_one_batch_task():
             ]
             assert len(task["outputs"]) == 1
             assert "--classification-file" in task["commands"]["resume"]
+            template = task["protocol"]["template"]
+            assert [item["file"] for item in template["decisions"]] == [
+                "inbox/agenda.txt", "inbox/attendees.txt",
+            ]
+            assert all(
+                item["doc_type"] == "ambiguous"
+                and item["confidence"] == "low"
+                and module.classification_review_schema(item)
+                for item in template["decisions"]
+            )
     finally:
         (
             module.REPO, module.INBOX, module.sf.ensure_index, module.sf.lookup_exact,
@@ -538,6 +628,9 @@ def test_duplicate_only_report_has_duplicate_terminal_status():
     assert compact["status"] == "duplicate_found"
     assert compact["duplicates"] == 1
     assert compact["failed"] == 0
+    assert compact["terminal"] is True
+    assert compact["committed"] is False
+    assert compact["counts"]["committed"] == 0
 
 
 def test_dsi_tool_routes_file_types():
@@ -831,12 +924,16 @@ def test_api_classification_review_resolves_uncertain_program_decision():
 
 def test_agent_classification_evidence_allows_pdf_line_wrapping():
     decision = {
-        "review_text": "A Simple Tensor Network\nAlgorithm for Two-Dimensional Systems",
+        "review_text": (
+            "A Simple Tensor Network\nAlgorithm for Two-Dimensional Systems. "
+            "We study the large-\ndistance limit."
+        ),
     }
     review = {
         "doc_type": "paper",
         "evidence_quotes": [
             "A Simple Tensor Network Algorithm for Two-Dimensional Systems",
+            "the large-distance limit",
         ],
     }
     module._validate_agent_classification(Path("inbox/paper.pdf"), decision, review)
@@ -846,6 +943,8 @@ def test_agent_classification_evidence_allows_pdf_line_wrapping():
         module._validate_agent_classification(Path("inbox/paper.pdf"), decision, review)
     except ValueError as exc:
         assert "evidence_quotes" in str(exc)
+        assert "evidence_quotes[0]" in str(exc)
+        assert "A Different Tensor Network Algorithm" in str(exc)
     else:
         raise AssertionError("Changed lexical evidence must still be rejected")
 
@@ -865,6 +964,24 @@ def test_plan_ingest_order_versions_last():
     assert names.index("contract.txt") < names.index("contract-盖章扫描版.txt")
     assert "paper.pdf" in names
     assert any("盖章扫描版" in note for note in notes)
+
+
+def test_map_paper_batch_preserves_identity_in_every_state():
+    statuses = ["graph_ready", "prepared", "agent_required", "partial", "failed",
+                "completed", "duplicate_found", "finalize", "validation_error"]
+    parsed = {"items": [{
+        "source": f"inbox/{status}.pdf", "status": status,
+        "transaction_id": f"txn-{status}", "paper_id": f"paper-{status}",
+        "raw_dir": f"academic/raw/references/{status}",
+        "wiki_path": f"academic/wiki/papers/{status}", "execution_backend": "api",
+        "state_ref": f"temp/inbox-state/txn-{status}.json",
+    } for status in statuses]}
+    mapped = module._map_paper_batch_results(parsed)
+    for original, result in zip(parsed["items"], mapped):
+        for key in ("source", "transaction_id", "paper_id", "raw_dir", "wiki_path",
+                    "execution_backend", "state_ref"):
+            assert result[key] == original[key]
+        assert result["ok"] == (result["status"] in {"completed", "duplicate_found"})
 
 
 def test_map_paper_batch_results():
@@ -927,8 +1044,49 @@ def test_result_entry_names_api_host_recovery_not_legacy_handoff():
         },
     }
     entry = module._result_entry("paper.pdf", "paper", parsed)
-    assert entry["reason"] == "API worker 自动恢复耗尽，等待宿主 Agent 修正暂存产物"
+    assert entry["reason"] == "API 产物等待宿主 Agent 复核或修正"
+    batch_entry = module._map_paper_batch_results({"items": [
+        {**parsed, "source": "inbox/paper.pdf"},
+    ]})[0]
+    assert batch_entry["reason"] == entry["reason"]
+    assert "耗尽" not in entry["reason"]
     assert "legacy" not in entry["reason"]
+    parsed["errors"] = ["selections.authors.proposed[0]: 缺少 evidence；多余 locator"]
+    for entry in (
+        module._result_entry("paper.pdf", "paper", parsed),
+        module._map_paper_batch_results({"items": [
+            {**parsed, "source": "inbox/paper.pdf"},
+        ]})[0],
+    ):
+        assert entry["reason"] == parsed["errors"][0]
+        assert entry["status"] == "agent_required"
+        assert entry["transaction_id"] == "txn-api-repair"
+        assert entry["next_action"] == "repair_api_workspace_then_resume"
+        assert not entry["ok"]
+
+
+def test_result_entry_preserves_specific_api_workspace_error():
+    parsed = {
+        "status": "agent_required",
+        "execution_backend": "api",
+        "errors": ["LLM 输出缺少 <<<WIKI>>> 段"],
+    }
+    entry = module._result_entry("paper.pdf", "paper", parsed)
+    assert entry["reason"] == "LLM 输出缺少 <<<WIKI>>> 段"
+
+
+def test_result_entry_prefers_failed_state_error_over_wrapper_output():
+    parsed = {
+        "status": "failed",
+        "errors": ["HTTP 404 Not Found: Invalid model GLM-5"],
+    }
+    entry = module._result_entry(
+        "paper.pdf",
+        "paper",
+        parsed,
+        "[ERROR category=unknown script=ingest_paper.py code=1]",
+    )
+    assert entry["reason"] == "HTTP 404 Not Found: Invalid model GLM-5"
 
 
 def test_auto_resolve_abbr_key_contract():
@@ -941,6 +1099,14 @@ def test_auto_resolve_abbr_key_contract():
     try:
         with tempfile.TemporaryDirectory() as tmp:
             module.REPO = Path(tmp)
+            todo = module.REPO / "cross-domain/abbreviation-todo.jsonl"
+            todo.parent.mkdir(parents=True)
+            todo.write_text(json.dumps({
+                "schema_version": "abbreviation-todo-v2",
+                "token": "CONFLICTBANK", "page": "academic/wiki/papers/x",
+                "subject": "x", "predicate": "包含", "object": "CONFLICTBANK",
+                "field": "object",
+            }) + "\n", encoding="utf-8")
             module.ic.lightweight_abbr_resolve = lambda _repo: {
                 "status": "completed", "resolved": 0, "remaining": 1, "details": [],
             }
@@ -950,6 +1116,9 @@ def test_auto_resolve_abbr_key_contract():
                     "warning_count": 1,
                     "candidates": [{
                         "token": "CONFLICTBANK", "suggested_kind": "canonical_name",
+                        "allowed_kinds": ["canonical_name", "ambiguous"],
+                    }, {
+                        "token": "STALE", "suggested_kind": "ambiguous",
                         "allowed_kinds": ["canonical_name", "ambiguous"],
                     }],
                 }),
@@ -963,6 +1132,7 @@ def test_auto_resolve_abbr_key_contract():
             review = module.REPO / summary["review_file"]
             payload = json.loads(review.read_text(encoding="utf-8"))
             assert payload["candidates"][0]["token"] == "CONFLICTBANK"
+            assert all(item["token"] != "STALE" for item in payload["candidates"])
             assert payload["candidate_token_count"] == 1
             assert review.name == "session-unsafe.json"
     finally:
@@ -983,16 +1153,29 @@ def test_compact_summary_excludes_graph_diagnostics_and_returns_report_path():
     report_path = module.REPO / "cross-domain" / "ingest-reports" / "test.json"
     compact = module._compact_summary(report, report_path)
     assert compact["status"] == "completed"
+    assert compact["schema"] == "ingest-result-v1"
+    assert compact["workflow_status"] == "completed"
+    assert compact["terminal"] is True
+    assert compact["counts"]["total"] == 1
     assert compact["report_path"] == "cross-domain/ingest-reports/test.json"
     assert "graph_report" not in compact["files"][0]
     assert compact["backend"] == "api"
+    assert compact["files"][0]["quality_warning_count"] == 0
+    assert compact["files"][0]["quality_warning_history_count"] == 0
+    stale = {**report, "degraded": 1}
+    assert module._compact_summary(stale, report_path)["degraded"] == 0
+    assert stale["degraded"] == 1
     warnings = [{"issue": "ambiguous", "detail": "long" * 100, "candidates": ["large"]}] * 8
-    warned = {**report, "files": [{**report["files"][0], "quality_warnings": warnings}]}
+    warned = {**report, "files": [{
+        **report["files"][0], "quality_warnings": warnings,
+        "quality_warning_history": [*warnings, {"issue": "resolved"}],
+    }]}
     warning_summary = module._compact_summary(warned, report_path)["files"][0]
     assert warning_summary["quality_warning_count"] == 8
     assert len(warning_summary["quality_warnings"]) == 5
     assert len(warning_summary["quality_warnings"][0]["detail"]) == 240
     assert "candidates" not in warning_summary["quality_warnings"][0]
+    assert warning_summary["quality_warning_history_count"] == 9
     blocked = {**report, "completed": 0, "failed": 0, "awaiting_agent": 1,
                "pending": 1,
                "files": [{"file": "b.pdf", "status": "agent_required", "reason": "agent 接管"}]}
@@ -1236,7 +1419,79 @@ def test_maintenance_error_does_not_override_completed_file_status():
             assert compact["maintenance"]["status"] == "error"
     finally:
         (module.REPO, module._auto_resolve_abbreviations,
-         module.ic.detect_people_page_candidates, module._auto_create_hubs) = originals
+        module.ic.detect_people_page_candidates, module._auto_create_hubs) = originals
+
+
+def test_compact_maintenance_preserves_backlog_without_overriding_file_status():
+    for remaining, split_backlog in ((1, 4), (0, 0)):
+        maintenance = {
+            "status": "completed", "actions": [], "errors": [],
+            "components": {
+                "people": {
+                    "status": "completed", "pending_total": 2,
+                    "candidates": [{"large_candidate": "not in compact output"}],
+                    "auto_built": {
+                        "created": 2 - remaining, "skipped_existing": 0,
+                        "skipped_conflict": remaining, "remaining": remaining,
+                        "details": [{"large_detail": "not in compact output"}],
+                    },
+                },
+                "hubs": {
+                    "status": "no_action", "backlog_count": remaining,
+                    "split_backlog_count": split_backlog,
+                    "candidates": [{"large_candidate": "not in compact output"}],
+                },
+            },
+        }
+        report = {
+            "total": 1, "completed": 1, "degraded": 0, "failed": 0, "skipped": 0,
+            "files": [{"file": "meeting.txt", "status": "completed"}],
+            "maintenance": maintenance,
+        }
+        compact = module._compact_summary(
+            report, module.REPO / "cross-domain/ingest-reports/report.json",
+        )
+        assert compact["file_status"] == "completed"
+        assert compact["maintenance"]["status"] == "completed"
+        assert compact["maintenance"]["actions"] == []
+        components = compact["maintenance"]["components"]
+        assert components["people"]["pending_total"] == 2
+        assert components["people"]["auto_built"] == {
+            "created": 2 - remaining, "skipped_existing": 0,
+            "skipped_conflict": remaining, "remaining": remaining,
+        }
+        assert components["hubs"]["backlog_count"] == remaining
+        assert components["hubs"]["split_backlog_count"] == split_backlog
+        assert "candidates" not in components["people"]
+        assert "candidates" not in components["hubs"]
+        assert "details" not in components["people"]["auto_built"]
+
+
+def test_people_maintenance_validates_created_and_relinked_pages():
+    completed = module.subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="汇总: 2 文件, ERROR=0, WARN=0\n", stderr="",
+    )
+    with patch.object(module.subprocess, "run", return_value=completed) as run:
+        report = module._validate_people_artifacts({"details": [{
+            "page_path": "academic/wiki/authors/person-test",
+            "updated_link_pages": ["academic/wiki/conferences/meeting-test"],
+        }]})
+    assert report["status"] == "completed"
+    command = run.call_args.args[0]
+    assert "academic/wiki/authors/person-test.md" in command
+    assert "academic/wiki/conferences/meeting-test.md" in command
+
+
+def test_people_maintenance_surfaces_validation_failure():
+    completed = module.subprocess.CompletedProcess(
+        args=[], returncode=1, stdout="ERROR=1\n", stderr="",
+    )
+    with patch.object(module.subprocess, "run", return_value=completed):
+        report = module._validate_people_artifacts({"details": [{
+            "page_path": "academic/wiki/authors/person-test",
+        }]})
+    assert report["status"] == "error"
+    assert report["returncode"] == 1
 
 
 def test_maintenance_rejects_incomplete_completed_result_envelope():
@@ -1461,6 +1716,11 @@ def test_initial_maintenance_publication_and_historical_reconciliation(historica
                     "split_count": 0, "redistribution_count": 0,
                 }},
             }
+            receipt["components"]["people"] = {
+                "status": "completed", "pending_total": 1,
+                "auto_built": {"created": 0, "skipped_conflict": 1, "remaining": 1},
+            }
+            receipt["components"]["hubs"].update({"backlog_count": 0, "split_backlog_count": 4})
             module._write_json_atomic(root / route_rel, reviews)
             module._write_json_atomic(root / receipt_rel, receipt)
             report = {"total": 2, **module._report_counts(files), "files": files, "maintenance": receipt}
@@ -1510,6 +1770,8 @@ def test_initial_maintenance_publication_and_historical_reconciliation(historica
                         assert inbox_state.load(member["transaction_id"])["maintenance"]["status"] == expected
             summary = module.reconcile_maintenance_report(report_path)
             assert summary["maintenance"]["status"] == "completed"
+            assert summary["maintenance"]["components"]["people"]["auto_built"]["remaining"] == 1
+            assert summary["maintenance"]["components"]["hubs"]["split_backlog_count"] == 4
             repaired = json.loads(report_path.read_text())
             assert repaired["maintenance"]["components"]["hubs"]["route_review_count"] == 0
             assert repaired["degraded"] == 2
@@ -1517,6 +1779,9 @@ def test_initial_maintenance_publication_and_historical_reconciliation(historica
                 linked = inbox_state.load(member["transaction_id"])["maintenance"]
                 assert linked["status"] == "completed"
                 assert linked["components"]["hubs"]["route_review_count"] == 0
+                assert linked["components"]["hubs"]["split_backlog_count"] == 4
+                assert linked["components"]["people"]["pending_total"] == 1
+                assert linked["components"]["people"]["auto_built"]["skipped_conflict"] == 1
                 assert linked == inbox_state.load(files[0]["transaction_id"])["maintenance"]
             assert not module._hub_route_reviews(repaired["files"])
             assert all(item["quality_warnings"] for item in repaired["files"])
@@ -1533,6 +1798,114 @@ def test_initial_maintenance_publication_and_historical_reconciliation(historica
             summary = module.reconcile_maintenance_report(report_path)
             assert summary["maintenance"]["status"] == "agent_required"
             assert json.loads(report_path.read_text())["maintenance"]["actions"] == receipt["actions"]
+
+
+def test_split_handoff_reconciliation(preserve_pending=False, interrupt_receipt=False):
+    import inbox_state
+    import hub_semantics
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary).resolve()
+        with patch.object(module, "REPO", root), patch.object(inbox_state, "REPO", root), \
+                patch.object(hub_semantics, "REPO", root), \
+                patch.object(hub_semantics.gl, "REPO", root), \
+                patch.object(hub_semantics, "_embed", side_effect=AssertionError("no embedding")):
+            graph_path = root / "cross-domain/graph.db"
+            graph_path.parent.mkdir(parents=True)
+            conn = hub_semantics.gl.connect(graph_path)
+            hub_semantics.gl.init_schema(conn)
+            parent = "academic/wiki/hubs/parent"
+            hub_semantics.create_hub(
+                conn, path=parent, title="父方向",
+                scope="研究量子多体动力学和张量网络态表示中的方法、结构与计算问题。",
+                agent_confirmed=True,
+            )
+            groups = [["open-system", "dissipation"], ["matrix-product", "isometric-state"]]
+            for index, members in enumerate(groups):
+                child = f"academic/wiki/hubs/child-{index}"
+                hub_semantics.create_hub(
+                    conn, path=child, title=f"子方向{index}", parent=parent,
+                    scope=f"研究子方向{index}中量子多体系统的状态结构与高效数值模拟问题。",
+                    agent_confirmed=True, lifecycle_operation="split",
+                )
+                for member in members:
+                    hub_semantics.gl.ensure_node(conn, member, member, "entity", entity_subtype="keyword")
+                    conn.execute(
+                        "INSERT INTO edges(subject,predicate,object,confidence,source,is_sr) "
+                        "VALUES(?, ?, ?, '推断', '', 0)",
+                        (member, hub_semantics.MEMBERSHIP_PREDICATE, child),
+                    )
+            conn.commit()
+            conn.close()
+            graph_before = graph_path.read_bytes()
+            split_rel = "temp/hub-auto-split/initial.json"
+            receipt_rel = "temp/inbox-maintenance/initial.json"
+            report_path = root / "cross-domain/ingest-reports/initial.json"
+            candidates = [{"hub": parent, "clusters": [{"members": members} for members in groups]}]
+            if preserve_pending:
+                candidates.append({
+                    "hub": "academic/wiki/hubs/unprocessed", "clusters": candidates[0]["clusters"],
+                    "resolution": {"status": "applied"},
+                })
+            module._write_json_atomic(root / split_rel, candidates)
+            receipt = {
+                "status": "agent_required", "receipt_path": receipt_rel, "errors": [],
+                "actions": [{"component": "hubs", "split_candidates_file": split_rel}],
+                "components": {"hubs": {
+                    "status": "agent_required", "split_candidates_file": split_rel,
+                    "split_count": len(candidates), "eligible_count": 0,
+                    "redistribution_count": 0, "route_review_count": int(preserve_pending),
+                }},
+            }
+            if preserve_pending:
+                receipt["actions"].append({"component": "abbreviations", "next_action": "review"})
+            module._write_json_atomic(root / receipt_rel, receipt)
+            files = []
+            for transaction_id in ("txn-first", "txn-second"):
+                state = {
+                    "transaction_id": transaction_id, "status": "completed",
+                    "wiki_path": f"academic/wiki/papers/{transaction_id}",
+                    "ok": True,
+                    "quality_status": "degraded", "quality_warnings": [{"issue": "unrelated_warning"}],
+                }
+                inbox_state.save(transaction_id, state)
+                files.append(dict(state))
+            report = {"total": 2, **module._report_counts(files), "files": files, "maintenance": receipt}
+            assert module.publish_maintenance_report(report_path, report)
+            original_write = module._write_json_atomic
+            if interrupt_receipt:
+                def interrupted_write(path, value):
+                    if path == root / receipt_rel and value["components"]["hubs"]["split_count"] == 0:
+                        raise OSError("receipt write interrupted")
+                    return original_write(path, value)
+                with patch.object(module, "_write_json_atomic", side_effect=interrupted_write):
+                    interrupted = module.reconcile_maintenance_report(report_path)
+                assert interrupted["completed"] == 2 and interrupted["failed"] == 0
+                assert interrupted["maintenance"]["status"] == "error"
+                assert interrupted["maintenance"]["retryable"] is True
+                assert json.loads((root / split_rel).read_text())[0]["resolution"]["status"] == "applied"
+                assert json.loads((root / receipt_rel).read_text())["components"]["hubs"]["split_count"] == 1
+            summary = module.reconcile_maintenance_report(report_path)
+            expected = "agent_required" if preserve_pending else "completed"
+            assert summary["completed"] == 2 and summary["failed"] == 0
+            assert summary["maintenance"]["status"] == expected
+            repaired = json.loads(report_path.read_text())
+            hubs = repaired["maintenance"]["components"]["hubs"]
+            assert hubs["split_count"] == int(preserve_pending)
+            assert hubs["route_review_count"] == int(preserve_pending)
+            assert repaired["degraded"] == 2
+            if preserve_pending:
+                assert repaired["maintenance"]["actions"] == receipt["actions"]
+            else:
+                assert repaired["maintenance"]["actions"] == []
+            for item in files:
+                state = inbox_state.load(item["transaction_id"])
+                assert state["status"] == "completed"
+                assert state["quality_warnings"] == item["quality_warnings"]
+                assert state["maintenance"]["status"] == expected
+                assert state["maintenance"]["components"]["hubs"]["split_count"] == int(preserve_pending)
+            module.reconcile_maintenance_report(report_path)
+            assert json.loads(report_path.read_text()) == repaired
+            assert graph_path.read_bytes() == graph_before
 
 
 def test_maintenance_publication_rejects_mismatched_state_before_writing():
@@ -1595,9 +1968,11 @@ def test_maintenance_publication_recovers_write_failures():
                 original_write = module._write_json_atomic
                 writes = []
                 def injected_write(path, value):
-                    writes.append(value["maintenance"]["publication"]["status"])
-                    if scenario == "initial_report" or scenario == "final_report" and len(writes) >= 2:
-                        raise OSError("simulated report write failure")
+                    if Path(path).resolve() == report_path.resolve():
+                        writes.append(value["maintenance"]["publication"]["status"])
+                        if (scenario == "initial_report"
+                                or scenario == "final_report" and len(writes) >= 2):
+                            raise OSError("simulated report write failure")
                     return original_write(path, value)
                 def injected_save(transaction_id, state):
                     if scenario == "interruption" and transaction_id == "txn-second":
@@ -1632,7 +2007,10 @@ def test_maintenance_publication_recovers_write_failures():
                     assert persisted["maintenance"]["publication"]["status"] == expected
                     compact = module.reconcile_maintenance_report(report_path)
                     assert compact["maintenance"]["status"] == "completed"
-                assert json.loads((root / receipt_rel).read_text()) == receipt
+                bound_receipt = json.loads((root / receipt_rel).read_text())
+                assert bound_receipt["status"] == receipt["status"]
+                assert bound_receipt["report_path"] == str(report_path.relative_to(root))
+                assert bound_receipt["publication"]["status"] == "completed"
                 for item in files:
                     state = inbox_state.load(item["transaction_id"])
                     assert state["status"] == "completed"
@@ -1641,6 +2019,101 @@ def test_maintenance_publication_recovers_write_failures():
                 repaired = json.loads(report_path.read_text())
                 module.reconcile_maintenance_report(report_path)
                 assert json.loads(report_path.read_text()) == repaired
+
+
+def test_maintenance_separates_warning_history_from_unresolved_quality():
+    record = {
+        "quality_status": "degraded",
+        "quality_warnings": [
+            {"issue": "semantic_bare_abbreviation", "detail": "RIND"},
+            {"issue": "graph_navigation_ambiguous", "detail": "1 mention"},
+        ],
+        "semantic_warnings": [{"issue": "bare_abbreviation", "line": "RIND"}],
+    }
+    maintenance = {"components": {"abbreviations": {
+        "status": "completed", "remaining_occurrences": 0,
+    }}}
+    module._reconcile_quality_after_maintenance(record, maintenance)
+    assert record["quality_status"] == "degraded"
+    assert record["quality_warnings"] == [
+        {"issue": "graph_navigation_ambiguous", "detail": "1 mention"},
+    ]
+    assert {warning["issue"] for warning in record["quality_warning_history"]} == {
+        "semantic_bare_abbreviation", "graph_navigation_ambiguous",
+    }
+    assert record["semantic_warnings"] == []
+    module._reconcile_quality_after_maintenance(record, maintenance)
+    assert len(record["quality_warning_history"]) == 2
+
+
+def test_maintenance_publication_recounts_current_quality():
+    import inbox_state
+
+    scenarios = (
+        ("agent", "completed", 0, False),
+        ("api", "completed", 0, False),
+        ("api", "completed", 0, True),
+        ("agent", "agent_required", 1, True),
+        ("api", "error", 0, True),
+    )
+    for backend, abbreviation_status, remaining, independent_warning in scenarios:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            with patch.object(module, "REPO", root), patch.object(inbox_state, "REPO", root):
+                receipt_rel = "temp/inbox-maintenance/quality.json"
+                report_path = root / "cross-domain/ingest-reports/quality.json"
+                maintenance = {
+                    "status": abbreviation_status, "receipt_path": receipt_rel,
+                    "actions": [], "errors": [],
+                    "components": {"abbreviations": {
+                        "status": abbreviation_status, "remaining_occurrences": remaining,
+                    }},
+                }
+                module._write_json_atomic(root / receipt_rel, maintenance)
+                files = []
+                for transaction_id in ("resolved", "independent"):
+                    warnings = [{"issue": "semantic_bare_abbreviation", "detail": "LM"}]
+                    if transaction_id == "independent" and independent_warning:
+                        warnings.append({"issue": "graph_navigation_ambiguous", "detail": "1 mention"})
+                    state = {
+                        "status": "completed", "ok": True, "transaction_id": transaction_id,
+                        "wiki_path": f"academic/wiki/papers/{transaction_id}",
+                        "quality_status": "degraded", "quality_warnings": warnings,
+                    }
+                    inbox_state.save(transaction_id, state)
+                    files.append(dict(state))
+                report = {
+                    "total": len(files), **module._report_counts(files),
+                    "files": files, "maintenance": maintenance, "backend": backend,
+                }
+                assert report["degraded"] == 2
+                expected_degraded = int(independent_warning) if abbreviation_status == "completed" else 2
+                snapshots = []
+                original_write = module._write_json_atomic
+
+                def capture_report(path, value):
+                    if Path(path) == report_path:
+                        snapshots.append((value["maintenance"]["publication"]["status"], value["degraded"]))
+                    original_write(path, value)
+
+                with patch.object(module, "_write_json_atomic", side_effect=capture_report):
+                    assert module.publish_maintenance_report(report_path, report)
+                assert snapshots == [("pending", expected_degraded), ("completed", expected_degraded)]
+                persisted = json.loads(report_path.read_text(encoding="utf-8"))
+                assert persisted["degraded"] == expected_degraded
+                assert module._report_counts(persisted["files"])["degraded"] == expected_degraded
+                compact = module._compact_summary(persisted, report_path)
+                assert compact["degraded"] == expected_degraded
+                assert compact["file_status"] == "completed"
+                assert compact["backend"] == backend
+                assert compact["completed"] == 2 and compact["failed"] == 0
+                for item in persisted["files"]:
+                    state = inbox_state.load(item["transaction_id"])
+                    assert state["quality_status"] == item["quality_status"]
+                    assert state["quality_warnings"] == item["quality_warnings"]
+                    assert state["quality_warning_history"] == item["quality_warning_history"]
+                module.reconcile_maintenance_report(report_path)
+                assert json.loads(report_path.read_text(encoding="utf-8")) == persisted
 
 
 def main():
@@ -1657,6 +2130,7 @@ def main():
     test_agent_run_directly_dispatches_without_importing_dsh()
     test_agent_run_directly_dispatches_without_importing_dsh(fail_publication=True)
     test_api_run_uses_dsh_loop_without_direct_dispatch()
+    test_api_run_resumes_unique_same_source_transaction()
     test_agent_low_confidence_classification_is_one_batch_task()
     test_exact_duplicate_cleanup_reverifies_and_writes_receipt()
     test_exact_duplicate_cleanup_refuses_sha_mismatch()
@@ -1672,14 +2146,21 @@ def main():
     test_api_classification_review_resolves_uncertain_program_decision()
     test_agent_classification_evidence_allows_pdf_line_wrapping()
     test_plan_ingest_order_versions_last()
+    test_map_paper_batch_preserves_identity_in_every_state()
     test_map_paper_batch_results()
     test_map_paper_batch_preserves_bibliographic_review_contract()
+    test_result_entry_names_api_host_recovery_not_legacy_handoff()
+    test_result_entry_preserves_specific_api_workspace_error()
+    test_result_entry_prefers_failed_state_error_over_wrapper_output()
     test_auto_resolve_abbr_key_contract()
     test_compact_summary_excludes_graph_diagnostics_and_returns_report_path()
     test_auto_create_hubs_writes_split_handoff()
     test_hub_timeout_is_deferred_and_retryable()
     test_zero_success_skips_global_post_ingest_scans()
     test_maintenance_error_does_not_override_completed_file_status()
+    test_compact_maintenance_preserves_backlog_without_overriding_file_status()
+    test_people_maintenance_validates_created_and_relinked_pages()
+    test_people_maintenance_surfaces_validation_failure()
     test_maintenance_rejects_incomplete_completed_result_envelope()
     test_abbreviation_decisions_require_exact_pending_tokens_and_atomic_todo()
     test_abbreviation_decisions_close_only_matching_maintenance_action()
@@ -1687,9 +2168,14 @@ def main():
     test_initial_maintenance_publication_and_historical_reconciliation()
     test_initial_maintenance_publication_and_historical_reconciliation(historical=False)
     test_initial_maintenance_publication_and_historical_reconciliation(historical=False, interrupt_publication=True)
+    test_split_handoff_reconciliation()
+    test_split_handoff_reconciliation(preserve_pending=True)
+    test_split_handoff_reconciliation(interrupt_receipt=True)
     test_maintenance_publication_rejects_mismatched_state_before_writing()
     test_maintenance_publication_recovers_write_failures()
     test_paper_batch_keeps_preclassified_fingerprint_results()
+    test_maintenance_separates_warning_history_from_unresolved_quality()
+    test_maintenance_publication_recounts_current_quality()
     print("ingest_inbox dispatch regression: PASS")
 
 

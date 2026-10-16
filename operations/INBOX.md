@@ -45,19 +45,23 @@
 
 紧凑回执保留质量告警总数和最多 5 条 issue/detail 摘要（每字段最多 240 字符）；先据此定位降级原因，只有摘要不足时再按报告字段定向读取完整诊断。
 
-首次摄入与直接 resume 使用共享报告发布入口，把维护回执及报告地址关联到本批所有已完成事务。历史报告缺少关联时运行 `python3 .scripts/ingest_inbox.py --reconcile-maintenance-report cross-domain/ingest-reports/<report>.json`：仅重建指定报告的关联、重放已有方向裁决并同步回执，不重新摄入、不调用模型、不写 Raw 或图。独立质量告警和其他待审动作继续保留。
+维护摘要保留人物 `pending_total`、`auto_built` 的创建/跳过冲突/剩余计数，以及 Hub 的 `backlog_count`、`split_backlog_count`；`pending_total` 是本轮自动建页前的候选数，当前剩余以 `auto_built.remaining` 为准。`maintenance.status=completed` 只表示维护执行完成，不表示待审积压清零；交付时分别报告文件终态、维护终态与非零待审项，完整候选仍按报告/回执地址定向读取，不因积压覆盖文件成功状态。
+
+Hub 的 `backlog_count/split_backlog_count` 是未达到创建或稳定分裂门槛的观察候选数，不是等待 Agent 执行的任务数；只有达标候选及 `actions` 才是待审交接。`hubs.status=no_action` 时不能把观察计数表述为待审分裂，也不为清零而强行拆分；用户明确要求检查时，可按 `split-plan` 展示 `no_split` 及原因，保持原闸与成员不变。
+
+首次摄入与直接 resume 使用共享报告发布入口，把维护回执及报告地址关联到本批所有已完成事务。历史报告缺少关联，或 Hub 分裂成功后回执尚未闭合时，运行 `python3 .scripts/ingest_inbox.py --reconcile-maintenance-report cross-domain/ingest-reports/<report>.json`：仅重建指定报告的关联、重放已有方向裁决，并只读核验分裂父 Hub 的 canonical 直接子 Hub、既有 split Scope history 与原候选成员迁移。每个原簇须完整迁入不同子 Hub，且不再保留父 membership，才标记对应 handoff 已应用并更新 split_count；已有子 Hub、手写 resolution 或数量变化本身不能证明完成。不重新摄入、不调用模型、不写 Raw 或图。独立质量告警和其他待审动作继续保留，缺图或无可验证候选时保留待审。
 
 维护语义以共享回执为准，事务仅持有同步快照。发布先在报告写 `maintenance.publication.status=pending` 检查点，再同步本批事务，最后标为 `completed`；方向闭环同步全部关联事务而非仅当前论文。I/O 失败单独返回 `maintenance.status=error`、`publication`、`retryable` 与 `next_action`，文件 `completed` 和失败计数不变。已落检查点可用上述 reconcile 命令继续，直接 resume 遇到 publication pending/error 也只重试发布，不重跑全局维护；检查点尚未落盘时明确返回 `report_persisted=false`，须先恢复报告持久化条件，不假称存在可恢复报告。
 
 > **代码驱动优先**：论文 PDF → `ingest_paper.py`；会议纪要 → `ingest_meeting.py`；学术非论文及行政/教学/商业文档 → `ingest_document.py`（详见 `memory/playbooks/index.md` 对应条目）。文件扩展名只选择提取器：`.docx/.doc/.pptx/.md` 若命中文件名或正文中的强会议速记标记，仍显式传 `source_kind=meeting`，不得退化为普通 official-doc。PDF/TXT 不确定分数只在 `--run` 时进入对应 backend 的一次合并裁决；中/高置信度具体类型可纠正程序初判，`ambiguous`、低置信或裁决失败时才在事务前停止。`academic` 非论文必须分类为 `editorial`、`academic-reference` 或 `conference-summary`；文件名或正文首个 H1 同时含会议实体词与事务记录词时可强判为 `conference-summary`，其余不确定样本停在 `classification_required`，不得回退到 `admin`。单文件可用 `--document-type` 显式定类；该参数直接选择通用文档分流，同时保留程序初判用于审计。
 
 1. 用户触发处理（"处理 inbox""整理 inbox"等）
-2. **只读分流（必经）**：先运行 `python3 .scripts/inbox_plan.py --output temp/inbox-plan.json`。仅当 manifest 标记 `batch_eligible: true` 时才可按 batch 路由；否则每个普通文件都按 `create` 路由。`facts-pending.md` 仅在有事实条目时归档。
+2. **只读分流与预热（必经）**：先运行 `python3 .scripts/inbox_plan.py --output temp/inbox-plan.json`。计划器与执行器共用同一业务文件边界，隐藏控制项和系统元数据（如 `.gitkeep`、`.DS_Store`、未完成的隐藏暂存文件）不进入分类、batch eligibility 或执行队列。从 manifest 的实际分类确定首个待摄入项的 `subproject`、`content`、`source-kind` 与 `mode`；当前上下文首次公共域摄入随后用这些参数调用 `route.py --task ingest ... --context-warmup --format json`（`create` 必须同时传 `--stage 1`，`batch` 不传 stage），再立即运行统一入口。不得在分类前猜测 `academic/ordinary`；private 不预热；混合队列、后续 batch item、stage 和 resume 不重复预热。仅当 manifest 标记 `batch_eligible: true` 时才可按 batch 路由；否则每个普通文件都按 `create` 路由。`facts-pending.md` 仅在有事实条目时归档。
 3. **入文本到临时区**：按文件类型把可读全文落到 `temp/inbox-extract/`：
    - PDF：`extractor.py --external-pdf <inbox文件绝对路径> --paper <tmp-id> --papers-dir temp/inbox-extract` → `paper.pdf` + `paper.md`
    - `.txt` 会议纪要：直接是文本（仍传 `source-kind=meeting` 派发会议预处理与建边规则）
    - `.docx/.doc`：`ingest_document.py` 提取文本入临时区；强会议速记标记同时记录 `source_kind=meeting`
-   - `.pptx`：`ingest_document.py` 经 shared `pptx_document.py` 原生逐页提取，并复用既有本地页面渲染；返回 `pptx_review` Agent task。宿主完成源绑定逐页复核后原事务 resume，保持 semantic backend。原件、同名 Markdown、复核来源 sidecar 同事务归档，页图/PDF 不入 Raw；语义边界见 INGEST「演示文稿（PPTX）」。
+   - `.pptx`：`ingest_document.py` 经 shared `pptx_document.py` 原生逐页提取，并复用既有本地页面渲染；新流程使用独立视觉 API，`--allow-remote-ppt` 授权所选文件的内容识读；未完成时返回纯文字 `pptx_api_action`，主 Agent 不看图。API 完成源绑定逐页复核后原事务 resume，保持 semantic backend。原件、同名 Markdown、复核来源 sidecar 同事务归档，页图/PDF 不入 Raw；语义边界见 INGEST「演示文稿（PPTX）」。
    - `.xls/.xlsx`：`ingest_document.py` 使用 xlrd/openpyxl 忠实提取各工作表、原始行号、空值、隐藏状态与合并范围；原件和同名 Markdown companion 同事务落位。xls 读取保存值，公式表达式仍查原件；xlsx 同时保留公式及缓存值，不执行重算。语义组织遵循 `INGEST.md`「表格型清单与台账」。
    - `.md`：直接读
 4. **有界分类 + 单遍语义生成**：边界分类器最多读取 8,000 字符，只返回类型复核；放行后语义 Worker 读取所需上下文并产出：
@@ -77,16 +81,32 @@
    - **ingest_check PASS**：wiki 页 `ERROR=0`
    - 三件任一缺失 → **不清空 inbox**，定位问题修复后重验；不得传 `--cleanup` 或删除 inbox 原始文件
    - 全部齐全 → 记录回执路径后进入步骤 6
-   - 成功后由统一收尾维护依次处理缩写、人物页和 Hub；直接 `--resume` 成功也必须走同一入口，并把包含完整 `graph_report`、事务号和质量状态的报告写入 `cross-domain/ingest-reports/resume-<txn>.json`。若 inbox 仍有普通待摄入文件或非空 `facts-pending.md`，入口返回 `maintenance.status=deferred`，由最后一个完成项执行一次全局维护，禁止每篇重复扫描。文件终态见 `status`/`file_status`，维护终态见 `maintenance.status`，完整回执写 `temp/inbox-maintenance/`。类型化缩写与 Hub canonical 候选由主 Agent 批量处理，不能用维护 handoff 覆盖文件成功终态；缩写摘要须区分唯一 token 与 occurrence，Agent 决策应用后同步闭环对应 maintenance receipt。Hub membership 的 profile/Scope/prototype embedding 必须汇总去重后批量请求；路由 margin 不足或子方向特异性不足时写带 `route-apply --transaction-id` 模板的 `hub-route-review`，已有子 Hub 的超限父 Hub写带 Scope readiness/blockers 及 `define-scope`/`redistribute` 动作的 `hub-auto-redistribute`。120 秒维护超时只返回可重试 `deferred`。
-7. 清理：普通成功项在校验通过后删除临时区并清空对应 inbox 原件（保留 `facts-pending.md` 和 `.gitkeep`）。源指纹精确重复项须在既有路径仍位于受管 `raw/` 且 inbox/Raw 双方 SHA-256 复核一致后，写 `temp/inbox-duplicate-receipts/` 回执并移入可恢复废纸篓；复核失败不得删除。清理仅限事务拥有的副本与提取临时物；对话原件和 `inbox/.source-retention/` 持久保护标记均不在清理范围，不能因其为隐藏目录而递归删除。成功/失败阶段写入 `temp/inbox-state/<transaction-id>.json`，以便恢复。
+   - 成功后由统一收尾维护依次处理缩写、人物页和 Hub；直接 `--resume` 成功也必须走同一入口，并把包含完整 `graph_report`、事务号和质量状态的报告写入 `cross-domain/ingest-reports/resume-<txn>.json`。人物页只从相关 Wiki 的真实 Raw sources 建立，会议关系不会被描述成论文作者；新页同步机械来源边，人物页和被重链页面统一运行 `ingest_check --graph`，ERROR 使 maintenance 显式失败。若 inbox 仍有普通待摄入文件或非空 `facts-pending.md`，入口返回 `maintenance.status=deferred`，由最后一个完成项执行一次全局维护，禁止每篇重复扫描。文件终态见 `status`/`file_status`，维护终态见 `maintenance.status`，完整回执写 `temp/inbox-maintenance/`。类型化缩写与 Hub canonical 候选由主 Agent 批量处理，不能用维护 handoff 覆盖文件成功终态；缩写 review 同时给出 decision schema、输出路径和下一条命令，决策应用后按关联 `report_path` 对账报告与 maintenance receipt。Hub membership 的 profile/Scope/prototype embedding 必须汇总去重后批量请求；路由 margin 不足或子方向特异性不足时写带 `route-apply --transaction-id` 模板的 `hub-route-review`，已有子 Hub 的超限父 Hub写带 Scope readiness/blockers 及 `define-scope`/`redistribute` 动作的 `hub-auto-redistribute`。120 秒维护超时只返回可重试 `deferred`。
+7. 清理：普通成功项在校验通过后删除临时区并清空对应 inbox 原件（保留 `facts-pending.md` 和 `.gitkeep`）。查重前先增量协调可重建源指纹索引；paper/meeting/document 成功提交后由共享收尾登记原始 Raw 源实体，索引缺项或悬空项在下次协调修复。源指纹精确重复项须在既有路径仍位于受管 `raw/` 且 inbox/Raw 双方 SHA-256 复核一致后，写 `temp/inbox-duplicate-receipts/` 回执并移入可恢复废纸篓；复核失败不得删除。清理仅限事务拥有的副本与提取临时物；对话原件和 `inbox/.source-retention/` 持久保护标记均不在清理范围，不能因其为隐藏目录而递归删除。成功/失败阶段写入 `temp/inbox-state/<transaction-id>.json`，以便恢复。
 
 **事务入口（批量/非标准场景）**：`.scripts/inbox_ingest.py plan` → 每项 `prepare` → `complete`。仅用于 `ingest_paper.py`/`ingest_document.py` 未覆盖的批量或非标准场景；常规单篇摄入走 playbook 代码驱动脚本。
 
-**全论文批量**：`ingest_paper.py --inbox` 保持 graph_ready 两阶段屏障。quiet 模式的 prepare 最多并发 2 项，以重叠 MinerU/LLM 等待；所有 live graph preflight/commit 由 `graph_ingest` 的数据库级跨进程 writer lock 串行，逐篇保持独立原子事务。Agent resume 会按 transaction ID 回填原 batch 报告，最后一个 item 完成后用全批完整 `graph_report` 统一闭合维护；同源重复的旧未提交事务只能经 `inbox_state.py --supersede ... --by ...` 留痕关闭。
+**全论文批量**：`ingest_paper.py --inbox` 保持 graph_ready 两阶段屏障。quiet 模式的 prepare 最多并发 2 项，以重叠 MinerU/LLM 等待；所有 live graph preflight/commit 由 `graph_ingest` 的数据库级跨进程 writer lock 串行，逐篇保持独立原子事务。Agent resume 会按 transaction ID 回填原 batch 报告，最后一个 item 完成后用全批完整 `graph_report` 统一闭合维护；同源重复的旧未提交事务只能经 `inbox_state.py --supersede ... --by ...` 留痕关闭。单篇、batch item 与统一紧凑摘要均使用 `ingest-result-v1`；退出码 0 只表示调用产出了合法结果，`terminal=true` 表示工作流已闭合，`committed=true` 只表示所有 item 都真实完成知识提交，精确重复不得冒充提交。混合批次的实际提交数量读取 `counts.committed`。batch `counts` 由 item 四态派生并校验守恒，完整报告是可审计投影，不是第二套事务状态。
+
+**回执读取与交付**：首次进程 yield 后直接长等待，`running` 按 runtime 回执的建议间隔低频检查（默认 60 秒），`attention`/非零退出定向诊断，`done` 停止检查。只提取状态、`degraded`、逐项当前/历史告警数、maintenance 与 next_action，再按问题定向取证。共享维护发布在写 pending 检查点前从调和后的逐项质量重算 `degraded`；紧凑摘要也从逐项当前质量派生该数，并显式返回 `quality_warning_count` 和 `quality_warning_history_count`（含零值）。历史告警保留审计，不计入当前降级；独立未解决告警继续保留。`wiki_path` 可能是无 `.md` 的图 locator，实际文件优先使用 `verification_receipt.artifacts.wiki_path.path`，不要把逻辑地址直接交给文件读取工具。文件提交、维护执行、实际建页/归属动作和待办分别报告，Hub 扫描计数不等于本次新增待办。
+
+只读取得真实文件路径时，`wg.py task status` 的工作流视图位于外层 envelope 的 `result`：
+
+```bash
+python3 .scripts/wg.py task status <transaction-id> | jq '.result | {workflow_status, verification_status: .verification_receipt.status, wiki_file: .verification_receipt.artifacts.wiki_path.path}'
+```
+
+**事务状态与最终复验**：所有已持久化状态变化都由 `inbox_state.py` 按声明式前向/恢复图复验，不能靠直接改 `status` 或伪造 pending transition 跳过校验。`completed` 与 `duplicate_found` 保存 `verification-receipt-v1`，绑定稳定状态、转换轨迹、validator 回执与最终产物哈希。可用 `wg.py task status|next|verify <transaction-id>` 对任意事务只读查看、取得下一动作或重算回执；这些命令不执行 task action。回执证明协议闭合和产物未变，不证明事实语义正确，答案仍须沿 Wiki locator 回到 Raw。
 
 **论文书目预审**：DOI/arXiv 候选只从 PDF 元数据与 `paper.md` 前部身份区提取，并在 Abstract/Introduction 或 References/Bibliography/参考文献标题前截止，不得把正文引文当成本篇标识。`metadata.subject` 中可识别的完整期刊引文或期刊名，以及近端 `ACM Reference format:` 引用中的标题与 ACM/Proceedings venue，属于带精确证据的候选；关键词式 subject 不猜期刊。所有确定性提取结果均为 `candidate_only`，可靠 venue 候选存在时不得留空。Agent 后端把 candidate-id-v2 书目裁决、Wiki 与语义槽合并进一次 `paper-agent-workspace-v1` 接管，并把暂存 `paper.pdf` 的 `pages:1-2` 作为首个有界输入，要求 Agent 直接核对完整作者；带页码且绑定哈希的 `first-two-pages.txt` 仅作 PDF 工具不可用时的备用。两者都不替代 Raw，最终作者仍由候选 ID 或 `paper.md` locator validator 锁定。常规走 `paper_workspace_read → paper_workspace_check → paper_workspace_commit`；候选提供器版本落后且已有未提交输出时，须显式调用 `paper_workspace_refresh`，先归档旧输出到 `workspace-history/` 再刷新同一事务，禁止静默覆盖。check 同轮汇总可独立发现的 Wiki/semantic 问题，并在最终 Raw/Wiki 落位前对 live graph 执行回滚式 Graph plan 预检；公开状态仅为 `awaiting_agent|ready_to_commit|completed|failed`。只有作者候选确实不完整时，Agent 才可按受限 locator 提交完整逐人列表。
 
-**论文语义故障处理**：Agent backend 的结构性语义错误写回原 `agent-task-v1.issues`，当前宿主修正同一暂存产物后继续原 validator/commit；API backend 在有界修订耗尽后保留兼容 `agent_required`，再沿原事务恢复。弱 API 模型的 Wiki 撰写接收由摘要、定理和结论确定性组成的关键证据包，定理/等式/性能结论必须保留对象、条件和比较基准。语义槽少于 4 条时只定向重抽一次 slots，不重写已通过校验的 Wiki，并保留两次中覆盖更高的一版；仍稀疏才以 `graph_semantic_coverage_sparse` 降级提交。完整命题不再交专用 LLM 原子化；程序只链接本页已确认概念或主图唯一精确 title/alias，无匹配/歧义静默保留裸 proposition，不算 degraded。语义边不得从“关联/构造/表示”自行推导“基于”等方向关系；只有作者明示的限制或近似代价可标为“局限性”。合法 proposition object 不触发描述性短语误报；真正的描述性对象与裸缩写 warning 不阻断提交，但正常校验和 resume 都必须把它们持久化为质量告警。未登记但格式合格的新谓词会记录为候选并自动治理，不自动成为正式契约。
+**论文语义故障处理**：Agent backend 的结构性语义错误写回原 `agent-task-v1.issues`，当前宿主修正同一暂存产物后继续原 validator/commit；API backend 可因校验失败直接交接，也可在有界修订耗尽后保留兼容 `agent_required`，再沿原事务恢复。该状态只表示等待宿主复核或修正，不证明发生过重试或预算耗尽；单项与 batch 摘要优先保留具体校验错误。弱 API 模型的 Wiki 撰写接收由摘要、定理和结论确定性组成的关键证据包，定理/等式/性能结论必须保留对象、条件和比较基准。语义槽少于 4 条时只定向重抽一次 slots，不重写已通过校验的 Wiki，并保留两次中覆盖更高的一版；仍稀疏才以 `graph_semantic_coverage_sparse` 降级提交。完整命题不再交专用 LLM 原子化；程序只链接本页已确认概念或主图唯一精确 title/alias，无匹配/歧义静默保留裸 proposition，不算 degraded。语义边不得从“关联/构造/表示”自行推导“基于”等方向关系；只有作者明示的限制或近似代价可标为“局限性”。合法 proposition object 不触发描述性短语误报；真正的描述性对象与裸缩写 warning 不阻断提交，但正常校验和 resume 都必须把它们持久化为质量告警。未登记但格式合格的新谓词会记录为候选并自动治理，不自动成为正式契约。
+
+**书目协议与宿主接管**：API 的 `candidate-id-v2`（及旧 Agent 兼容产物）先按原文核验作者及次序；逐人候选能完整覆盖时优先选择有序 ID，错误、重复或多人合并候选不使已核验的完整候选组失效。只有候选确实缺失时才使用完整 `proposed` 列表，每项严格为 `{"value": "作者原文姓名", "evidence": "paper.md#L3"}`；错误键保持阻断，不静默转写。validator 返回具体字段路径、缺少/多余键与类型错误。论文返回兼容 handoff 后，先用 `ingest_paper.py --agent-workspace <txn>` 取得原事务的结构化任务，只提取 `status/issues/inputs/outputs/commands`，再按问题读取证据、填写指定输出并执行原 check/commit；修改命令成功后才运行校验。运行中按 runtime 回执用长等待，达到 `next_check_after_seconds` 再检查，不连续短轮询；交付分别报告文件提交、维护实际动作与待办，检查完成不等于创建了人物页或完成了 Hub 归属。
+
+**格式复用边界**：按已验证的模板族复用，不按期刊名推断正确性。ACM 首页 self-citation 作者补充须满足 PDF/Markdown DOI 与完整有序名单一致，仅增加缺失姓名候选；证据缺失或 OCR 分歧退回原工作区复核。API 候选表示只压缩重复协议元数据，事实字段与排除机构证据不裁剪，Agent 直接取证、原 validator 和事务不变；不新增模型调用，不把输入字符减少等同于实测 token、账单或重试减少。
+
+**弱模型治理检查**：`dsh/weak_model_governance_eval.py --validate` 是离线、合成、只读的任务协议试卷，覆盖畸形/截断 JSON、越权字段、仅置信度输出、缺失 evidence、来源提示注入和 fallback 轨迹完整性。通过不等于模型具备事实判断能力，也不会自动更改 preferred/fallback；真实模型仍须通过任务专属显式 eval。
 
 执行授权后应连续完成当前文件的“落位 → 巩固 → 校验 → 清理”；只有校验失败、目标冲突、需要用户确认的高风险实体或用户主动插话时才暂停。状态更新只报告已完成阶段与下一项阻塞，不把正常阶段切换当作暂停点。
 
@@ -103,7 +123,11 @@
 - 目标 raw 目录或 wiki 文件已存在时，脚本必须失败；更新既有条目走标准 `ingest update`，不得以 inbox 落位覆盖事实层
 - 行政文档中的 `department` 只接受 Raw 逐字出现的完整部门名称；负责人关系还须同一证据片段明确出现“负责人/负责”等职责措辞，校长讲话、主讲或发言身份不得自行推断部门或负责人
 - 统一入口按顶层结构化状态解释摄入结果；Agent 的 `prepared` 与 API 兼容的 `agent_required`，以及 `awaiting_agent`、`ready_to_commit`、`partial`、`graph_ready`、`classification_required` 等可继续状态，不得包装成普通进程错误。统一报告将 `duplicates`、`awaiting_agent`、`pending` 与 `failed` 分开统计；DSH 只在 API backend 解释这些状态
-- 分类 `evidence_quotes` 仍须能回溯输入，但 validator 先做 Unicode NFKC 和连续空白折叠，允许 PDF 标题断行等表示差异；增删实词后的概述不算原文证据
+- Agent 分类 task 按当前文件生成完整、fail-closed 的结果模板，避免重复拼装 JSON；分类 `evidence_quotes` 仍须能回溯输入，但 validator 先做 Unicode NFKC、单词内连字符换行拼接和连续空白折叠，允许 PDF 标题断行等表示差异，失败时指出具体 quote 索引；增删实词后的概述不算原文证据
+
+## 批次身份与恢复
+
+API 论文批次的每项结果在所有状态都保留 `transaction_id`、`source`、Raw/Wiki 地址和实际 backend，尤其不能在 `graph_ready` 屏障丢失身份。直接 resume 按事务号回到原批次，文件统计和维护回执同步该批所有已完成项。历史报告若丢失身份，只依据该报告已保存的原批次输出与对应事务核对补齐，再恢复；不得仅凭文件名推测事务或把单篇维护冒充整批闭环。
 
 ## 用户申明事实
 
