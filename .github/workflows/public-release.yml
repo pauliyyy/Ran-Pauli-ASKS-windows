@@ -1,0 +1,32 @@
+name: Public release gate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.28"
+          enable-cache: true
+      - name: Install locked verification environment
+        run: uv sync --frozen --extra release
+      - name: Diagnose release environment
+        run: uv run ran-asks doctor --profile release
+      - name: Run the public release profile
+        run: uv run ran-asks test release

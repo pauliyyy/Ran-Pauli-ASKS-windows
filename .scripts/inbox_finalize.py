@@ -12,7 +12,10 @@ import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+
+MANIFEST_V2 = "inbox-artifact-manifest-v2"
 
 
 def sha256_file(path: Path) -> str:
@@ -32,26 +35,60 @@ def require_within(path: Path, parent: Path, description: str, allow_parent: boo
         raise ValueError(f"{description} must not be {parent} itself")
 
 
-def load_manifest(path: Path) -> tuple[list[str], str]:
+def load_manifest(path: Path) -> tuple[list[dict], str]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"invalid manifest: {path} ({exc})") from exc
-    raw_files = data.get("raw_files")
     wiki_file = data.get("wiki_file")
-    if not isinstance(raw_files, list) or not raw_files or not all(isinstance(item, str) for item in raw_files):
-        raise ValueError("manifest.raw_files must be a non-empty list of file paths")
     if not isinstance(wiki_file, str):
         raise ValueError("manifest.wiki_file must be a file path")
-    if len(set(raw_files)) != len(raw_files):
-        raise ValueError("manifest.raw_files must not contain duplicates")
-    return raw_files, wiki_file
+    if data.get("schema") == MANIFEST_V2:
+        artifacts = data.get("raw_artifacts")
+        if not isinstance(artifacts, list) or not artifacts:
+            raise ValueError("manifest.raw_artifacts must be a non-empty list")
+        normalized = []
+        for item in artifacts:
+            if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+                raise ValueError("manifest.raw_artifacts entries must contain path")
+            if not isinstance(item.get("bytes"), int) or item["bytes"] < 0:
+                raise ValueError("manifest.raw_artifacts entries must contain non-negative bytes")
+            digest = item.get("sha256")
+            if not isinstance(digest, str) or len(digest) != 64:
+                raise ValueError("manifest.raw_artifacts entries must contain sha256")
+            role = item.get("role")
+            if not isinstance(role, str) or not role:
+                raise ValueError("manifest.raw_artifacts entries must contain role")
+            normalized.append({
+                "path": item["path"], "bytes": item["bytes"], "sha256": digest,
+                "role": role,
+            })
+    else:
+        raw_files = data.get("raw_files")
+        if not isinstance(raw_files, list) or not raw_files or not all(isinstance(item, str) for item in raw_files):
+            raise ValueError("manifest.raw_files must be a non-empty list of file paths")
+        normalized = [{"path": name, "bytes": None, "sha256": None, "role": "legacy"}
+                      for name in raw_files]
+    paths = [item["path"] for item in normalized]
+    if len(set(paths)) != len(paths):
+        raise ValueError("manifest raw artifacts must not contain duplicates")
+    return normalized, wiki_file
 
 
-def manifest_file(extract_dir: Path, name: str, label: str) -> Path:
-    if Path(name).name != name:
+def manifest_file(extract_dir: Path, name: str, label: str, *, nested: bool = False) -> Path:
+    if "\\" in name:
+        raise ValueError(f"manifest {label} must use POSIX relative paths: {name}")
+    relative = PurePosixPath(name)
+    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+        raise ValueError(f"manifest {label} must name a safe relative file: {name}")
+    if not nested and len(relative.parts) != 1:
         raise ValueError(f"manifest {label} must name a top-level file: {name}")
-    candidate = extract_dir / name
+    candidate = extract_dir.joinpath(*relative.parts)
+    cursor = extract_dir
+    for part in relative.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise ValueError(f"manifest {label} must not traverse symlinks: {name}")
     require_within(candidate.resolve(strict=False), extract_dir, f"manifest {label}")
     if not candidate.is_file() or candidate.is_symlink():
         raise ValueError(f"manifest {label} must name an existing non-symlink file: {name}")
@@ -63,10 +100,24 @@ def verify_real_file(path: Path) -> None:
         raise ValueError(f"not an entity file: {path}")
 
 
-def staged_copy(source: Path, destination: Path) -> dict[str, str | int]:
+def staged_copy(source: Path, destination: Path, relative_path: str | None = None) -> dict[str, str | int]:
+    destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, destination)
     verify_real_file(destination)
-    return {"path": destination.name, "bytes": destination.stat().st_size, "sha256": sha256_file(destination)}
+    return {
+        "path": relative_path or destination.name,
+        "bytes": destination.stat().st_size,
+        "sha256": sha256_file(destination),
+    }
+
+
+def verify_manifest_artifact(source: Path, entry: dict) -> None:
+    if entry.get("bytes") is None:
+        return
+    if source.stat().st_size != entry["bytes"]:
+        raise ValueError(f"manifest artifact size changed: {entry['path']}")
+    if sha256_file(source) != entry["sha256"]:
+        raise ValueError(f"manifest artifact hash changed: {entry['path']}")
 
 
 def run_ingest_check(project_root: Path, wiki_path: Path) -> None:
@@ -79,7 +130,15 @@ def run_ingest_check(project_root: Path, wiki_path: Path) -> None:
 
 def finalize(project_root: Path, paper_id: str, raw_dir: Path, wiki_path: Path,
              extract_dir: Path, manifest_path: Path, cleanup: bool,
-             allow_existing_raw_dir: bool = False) -> Path:
+             allow_existing_raw_dir: bool = False, *,
+             expected_wiki_sha256: str | None = None,
+             raw_guards: tuple[tuple[Path, str], ...] = (),
+             update_log: tuple[Path, str] | None = None) -> Path:
+    if expected_wiki_sha256 is not None and wiki_path.is_symlink():
+        raise ValueError("existing wiki must not be a symlink")
+    if any(original.is_symlink() for original, _digest in raw_guards):
+        raise ValueError("existing raw guards must not be symlinks")
+    raw_guards = tuple((original.resolve(), digest) for original, digest in raw_guards)
     project_root = project_root.resolve()
     extract_dir = extract_dir.resolve()
     raw_dir = raw_dir.resolve(strict=False)
@@ -101,18 +160,54 @@ def finalize(project_root: Path, paper_id: str, raw_dir: Path, wiki_path: Path,
         raise ValueError(f"destination raw path must be a directory: {raw_dir}")
     if raw_dir.exists() and not allow_existing_raw_dir:
         raise ValueError(f"destination raw directory already exists: {raw_dir}")
-    if wiki_path.exists() or wiki_path.is_symlink():
+    if expected_wiki_sha256 is not None:
+        if not wiki_path.is_file() or sha256_file(wiki_path) != expected_wiki_sha256:
+            raise ValueError("existing wiki hash changed")
+    elif wiki_path.exists() or wiki_path.is_symlink():
         raise ValueError(f"destination wiki file already exists: {wiki_path}")
 
-    raw_names, wiki_name = load_manifest(manifest_path)
-    raw_sources = [manifest_file(extract_dir, name, "raw_files entry") for name in raw_names]
+    original_wiki = wiki_path.read_bytes() if expected_wiki_sha256 is not None else None
+    log_path = None
+    original_log = None
+    if update_log is not None:
+        log_path, log_entry = update_log
+        if log_path.is_symlink():
+            raise ValueError("update log must not be a symlink")
+        log_path = log_path.resolve()
+        require_within(log_path, wiki_path.parent.parent, "update log")
+        original_log = log_path.read_bytes() if log_path.exists() else None
+
+    def check_update_guards():
+        if expected_wiki_sha256 is not None and sha256_file(wiki_path) != expected_wiki_sha256:
+            raise ValueError("existing wiki hash changed")
+        for original, expected_hash in raw_guards:
+            require_within(original.resolve(), raw_dir, "existing raw guard")
+            if original.is_symlink() or not original.is_file() or sha256_file(original) != expected_hash:
+                raise ValueError("existing raw hash changed")
+        if log_path is not None:
+            current_log = log_path.read_bytes() if log_path.exists() else None
+            if current_log != original_log:
+                raise ValueError("update log changed")
+
+    check_update_guards()
+
+    raw_entries, wiki_name = load_manifest(manifest_path)
+    is_v2 = all(entry.get("bytes") is not None for entry in raw_entries)
+    raw_sources = []
+    for entry in raw_entries:
+        source = manifest_file(
+            extract_dir, entry["path"],
+            "raw_artifacts entry" if is_v2 else "raw_files entry",
+            nested=is_v2,
+        )
+        verify_manifest_artifact(source, entry)
+        raw_sources.append((entry, source))
     wiki_source = manifest_file(extract_dir, wiki_name, "wiki_file")
-    if wiki_source in raw_sources:
+    if wiki_source in {source for _entry, source in raw_sources}:
         raise ValueError("manifest wiki_file must not also be a raw_files entry")
-    if len({source.name for source in raw_sources}) != len(raw_sources):
-        raise ValueError("manifest.raw_files must not resolve to duplicate destination names")
     if raw_dir.exists():
-        collisions = [source.name for source in raw_sources if (raw_dir / source.name).exists()]
+        collisions = [entry["path"] for entry, _source in raw_sources
+                      if raw_dir.joinpath(*PurePosixPath(entry["path"]).parts).exists()]
         if collisions:
             raise ValueError(f"destination raw files already exist: {', '.join(collisions)}")
 
@@ -121,30 +216,90 @@ def finalize(project_root: Path, paper_id: str, raw_dir: Path, wiki_path: Path,
     token = uuid.uuid4().hex
     staged_raw = raw_dir.parent / f".inbox-finalize-{raw_dir.name}-{token}"
     staged_wiki = wiki_path.parent / f".{wiki_path.name}.inbox-finalize-{token}"
+    receipt_dir = project_root / "temp" / "inbox-receipts"
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    receipt_path = receipt_dir / f"{paper_id}-{token}.json"
     committed_raw = False
     committed_wiki = False
+    committed_log = False
+    landed_paths: list[Path] = []
     try:
         staged_raw.mkdir()
-        raw_receipt = [staged_copy(source, staged_raw / source.name) for source in raw_sources]
+        raw_receipt = []
+        for entry, source in raw_sources:
+            relative = Path(*PurePosixPath(entry["path"]).parts)
+            receipt = staged_copy(source, staged_raw / relative, entry["path"])
+            if entry.get("bytes") is not None and (
+                    receipt["bytes"] != entry["bytes"] or receipt["sha256"] != entry["sha256"]):
+                raise ValueError(f"staged artifact differs from manifest: {entry['path']}")
+            receipt["role"] = entry["role"]
+            raw_receipt.append(receipt)
         wiki_receipt = staged_copy(wiki_source, staged_wiki)
+        check_update_guards()
         if raw_dir.exists():
-            for source in raw_sources:
-                os.replace(staged_raw / source.name, raw_dir / source.name)
-            staged_raw.rmdir()
+            for entry, _source in raw_sources:
+                relative = Path(*PurePosixPath(entry["path"]).parts)
+                destination = raw_dir / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if expected_wiki_sha256 is not None:
+                    os.link(staged_raw / relative, destination)
+                    landed_paths.append(destination)
+                    (staged_raw / relative).unlink()
+                else:
+                    os.replace(staged_raw / relative, destination)
+                    landed_paths.append(destination)
+            shutil.rmtree(staged_raw)
         else:
             os.replace(staged_raw, raw_dir)
         committed_raw = True
+        check_update_guards()
         os.replace(staged_wiki, wiki_path)
         committed_wiki = True
+        if expected_wiki_sha256 is not None:
+            run_ingest_check(project_root, wiki_path)
+            for original, expected_hash in raw_guards:
+                if sha256_file(original) != expected_hash:
+                    raise ValueError("existing raw hash changed during commit")
+        if log_path is not None:
+            if (log_path.read_bytes() if log_path.exists() else None) != original_log:
+                raise ValueError("update log changed during validation")
+            committed_log = True
+            log_path.write_bytes((original_log or b"") + log_entry.encode("utf-8"))
+        receipt = {
+            "status": "committed",
+            "paper_id": paper_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "manifest": str(manifest_path.relative_to(project_root)),
+            "raw_dir": str(raw_dir.relative_to(project_root)),
+            "wiki_path": str(wiki_path.relative_to(project_root)),
+            "raw_files": raw_receipt,
+            "wiki_file": wiki_receipt,
+            "existing_raw_guards": [{"path": str(original.relative_to(project_root)), "sha256": digest}
+                                    for original, digest in raw_guards],
+            "replaced_wiki_sha256": expected_wiki_sha256,
+        }
+        receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     except Exception:
+        receipt_path.unlink(missing_ok=True)
         if committed_wiki and wiki_path.exists():
-            wiki_path.unlink()
-        if committed_raw and raw_dir.exists():
+            if original_wiki is None:
+                wiki_path.unlink()
+            else:
+                wiki_path.write_bytes(original_wiki)
+        if committed_log:
+            if original_log is None:
+                log_path.unlink(missing_ok=True)
+            else:
+                log_path.write_bytes(original_log)
+        if raw_dir.exists() and (committed_raw or landed_paths):
             if allow_existing_raw_dir:
-                for source in raw_sources:
-                    landed = raw_dir / source.name
+                for landed in reversed(landed_paths):
                     if landed.exists():
                         landed.unlink()
+                    parent = landed.parent
+                    while parent != raw_dir and parent.is_dir() and not any(parent.iterdir()):
+                        parent.rmdir()
+                        parent = parent.parent
             else:
                 shutil.rmtree(raw_dir)
         raise
@@ -154,20 +309,6 @@ def finalize(project_root: Path, paper_id: str, raw_dir: Path, wiki_path: Path,
         if staged_wiki.exists():
             staged_wiki.unlink()
 
-    receipt_dir = project_root / "temp" / "inbox-receipts"
-    receipt_dir.mkdir(parents=True, exist_ok=True)
-    receipt_path = receipt_dir / f"{paper_id}-{token}.json"
-    receipt = {
-        "status": "committed",
-        "paper_id": paper_id,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "manifest": str(manifest_path.relative_to(project_root)),
-        "raw_dir": str(raw_dir.relative_to(project_root)),
-        "wiki_path": str(wiki_path.relative_to(project_root)),
-        "raw_files": raw_receipt,
-        "wiki_file": wiki_receipt,
-    }
-    receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if cleanup:
         run_ingest_check(project_root, wiki_path)
         shutil.rmtree(extract_dir)

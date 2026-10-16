@@ -36,7 +36,7 @@ def _extract_abbr_tokens(text):
     if not text:
         return []
     no_paren = re.sub(r"[（(][^)）]*[)）]", "", text)
-    return re.findall(r"[A-Z]{2,}[A-Za-z0-9]*", no_paren)
+    return gi.BARE_ABBREVIATION_TOKEN_RE.findall(no_paren)
 
 
 def _occurrence_target(entry: dict) -> str:
@@ -204,11 +204,21 @@ def _close_maintenance_receipt(receipt_path: Path, receipt: dict,
     )
     receipt["updated_at"] = datetime.now().isoformat(timespec="seconds")
     _write_json_atomic(receipt_path, receipt)
+    publication = {}
+    report_rel = str(receipt.get("report_path") or "").strip()
+    if report_rel:
+        try:
+            import ingest_inbox
+            compact = ingest_inbox.reconcile_maintenance_report(REPO / report_rel)
+            publication = (compact.get("maintenance") or {}).get("publication") or {}
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            publication = {"status": "error", "error": str(exc)}
     return {
         "status": receipt["status"],
         "receipt_path": str(receipt_path.relative_to(REPO.resolve())),
         "remaining_tokens": len(remaining_tokens),
         "remaining_occurrences": len(remaining_review),
+        "publication": publication,
     }
 
 

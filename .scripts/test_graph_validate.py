@@ -8,6 +8,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import graph_lib as gl
+import graph_delta as gd
+import graph_ingest as gi
 
 SCRIPT = Path(__file__).with_name("graph_validate.py")
 spec = importlib.util.spec_from_file_location("graph_validate", SCRIPT)
@@ -58,6 +60,37 @@ def test_invalid_node_type_and_entity_subtype_are_errors():
         assert report["counts"]["unknown_node_type"] == 1
         assert report["counts"]["unknown_entity_subtype"] == 1
         assert len(report["errors"]) == 2
+
+
+def test_meeting_writer_task_passes_configured_and_default_type_checks():
+    tmp, conn = isolated_db()
+    try:
+        page = "academic/wiki/conferences/example"
+        person = "academic/wiki/authors/example"
+        gl.ensure_node(conn, page, "Meeting", "page")
+        gl.ensure_node(conn, person, "Person", "people")
+        delta = gd.build_document_delta(page, {
+            "title": "Meeting", "type": "conference-summary",
+            "compiler_protocol": "meeting-compiler-v3",
+        }, [{"subject": person, "predicate": "待办", "object": "验证方案",
+             "source": "academic/raw/example.txt#L1"}])
+        plan = gd.plan_attachment(conn, delta)
+        gi.add_knowledge_edges(conn, page, gd.knowledge_edges(delta), attach_plan=plan)
+        assert conn.execute("SELECT COUNT(*) FROM nodes WHERE entity_subtype='task'").fetchone()[0] == 1
+        configured = module.load_config()
+        assert set(configured["entity_subtypes"]) == set(module.DEFAULTS["entity_subtypes"])
+        before = conn.total_changes
+        for config in (module.DEFAULTS, configured):
+            assert not module.validate_graph(conn, config)["errors"]
+        assert conn.total_changes == before
+        insert(conn, "misspelled-task", "entity", "task-typo")
+        for config in (module.DEFAULTS, configured):
+            report = module.validate_graph(conn, config)
+            assert report["counts"]["unknown_entity_subtype"] == 1
+            assert any(item["check"] == "unknown_entity_subtype" for item in report["errors"])
+    finally:
+        conn.close()
+        tmp.cleanup()
 
 
 def test_missing_keyword_description_is_aggregated_warning():
@@ -111,6 +144,33 @@ def test_duplicate_edges_are_warned():
         conn.close()
         assert report["counts"]["duplicate_semantic_edge"] == 1
         assert report["warnings"]
+
+
+def test_protected_route_requires_managed_authorization_origin():
+    tmp, conn = isolated_db()
+    try:
+        insert(conn, "academic/wiki/papers/a", "page")
+        insert(conn, "academic/wiki/hubs/h", "hub")
+        cursor = conn.execute(
+            "INSERT INTO edges (subject,predicate,object,confidence,source) VALUES (?,?,?,?,?)",
+            (
+                "academic/wiki/papers/a", "主要研究", "academic/wiki/hubs/h",
+                "推断", "academic/wiki/papers/a#研究方向定位",
+            ),
+        )
+        conn.commit()
+        report = module.validate_graph(conn, module.DEFAULTS)
+        assert report["counts"]["missing_protected_edge_authorization"] == 1
+        gl.add_edge_origin(
+            conn, cursor.lastrowid, "academic/wiki/papers/a",
+            "automatic-route:academic/wiki/papers/a#研究方向定位",
+        )
+        conn.commit()
+        report = module.validate_graph(conn, module.DEFAULTS)
+    finally:
+        conn.close()
+        tmp.cleanup()
+    assert report["counts"]["missing_protected_edge_authorization"] == 0
 
 
 def test_temporal_fact_dangling_endpoint_is_error():

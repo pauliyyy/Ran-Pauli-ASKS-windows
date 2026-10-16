@@ -19,7 +19,9 @@ LLM 判断指令类型后,调本脚本截取对应规范 section,拼成 prompt�
   route.py --task research # 研究:输出 RESEARCH 规范
   route.py --task frontier # 研究前沿:输出 FRONTIER 规范
   route.py --capability write --capability-profile academic # research 状态内按需加载论文落笔能力
-  route.py --list           # 分类列出 task/state 与 capability
+  route.py --capability cv --capability-profile general # workspace 状态内加载简历制作与维护契约
+  route.py --capability presentation --capability-profile create # PPT 创作契约与当前可执行入口
+  route.py --list           # 分类列出工作状态、路由任务与按需能力
 
 ingest 参数说明:
   --mode   create(默认)/update/batch
@@ -33,6 +35,7 @@ query 参数说明:
   --profile auto(默认) 会输出可组合意图；仅兼容调用时手动指定单一 profile
 """
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -42,6 +45,8 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / ".scripts"))
 import agent_task
 import engineering_locator as engineering_loc
+import function_registry as fr
+from route_rendering import render_routed_text
 from engineering_graph import capability as engineering_capability
 from engineering_graph import load as load_engineering_graph
 from engineering_graph import validate as validate_engineering_graph
@@ -65,6 +70,18 @@ QUERY_PROFILE_HINTS = {
     "relation": ("关系", "区别", "差异", "比较", "对比", "相关", "影响"),
     "traceability": ("为什么", "依据", "怎么决定", "过程", "冲突", "版本", "演进"),
 }
+
+PRIVATE_METAPHYSICS_HINTS = ("八字", "命理", "五行", "风水", "風水", "用神", "喜忌", "四柱", "排盘", "排盤")
+
+
+def resolve_query_topic(query, subproject, topic="auto"):
+    """Explicit topic wins; lexical hints only select guidance, not an interpretation."""
+    if topic == "metaphysics" and subproject != "private":
+        raise ValueError("query-topic=metaphysics requires --subproject private")
+    if topic != "auto":
+        return topic
+    return ("metaphysics" if subproject == "private"
+            and any(term in query for term in PRIVATE_METAPHYSICS_HINTS) else "general")
 
 USE_TASK_EXECUTION_DISCIPLINE = """--- 执行纪律（使用任务） ---
 - 以本次派发的任务卡和规范为当前步骤边界；先执行其中明确的下一步，完成后再推进。
@@ -219,11 +236,39 @@ ROUTES = {
         "file": "operations/FRONTIER.md",
         "sections": None,  # 全文输出
     },
+    "oral_exam": {
+        "file": "operations/ORAL_EXAM_AGENT.md",
+        "sections": None,
+    },
 }
 
-# 能力是工作状态内按需加载的规范包；它不改变当前 task/state。
+# 能力是工作状态内按需加载的规范包；它不创建或切换工作状态。
 # 顶层 --task write 继续作为 general profile 的兼容入口。
 CAPABILITY_ROUTES = {
+    "illustration": {"general": [("operations/ILLUSTRATION.md", None)]},
+    "science-exhibit": {
+        "create": [("operations/SCIENCE_EXHIBIT.md", None)],
+        "discuss": [("operations/SCIENCE_EXHIBIT.md", ["协作创作状态"])],
+        "resume": [("operations/SCIENCE_EXHIBIT.md", ["协作创作状态", "接续与修改"])],
+    },
+    "code-run": {"general": [("operations/CODE_RUN.md", None)]},
+    "code-library": {"general": [("operations/CODE_LIBRARY.md", None)]},
+    "extract-data": {"general": [("operations/EXTRACT_DATA.md", None)]},
+    "slide-library": {"general": [("operations/SLIDE_LIBRARY.md", None)]},
+    "graph-visualize": {"general": [("operations/GRAPH_VISUALIZE.md", None)]},
+    "cv": {
+        "general": [
+            ("operations/CV.md", ["功能边界", "工作主记录", "用户入口", "更新流程", "DOCX 与版本", "校验与交付"]),
+        ],
+    },
+    "presentation": {
+        "create": [
+            ("operations/PRESENTATION.md", ["入口与成熟度", "单篇论文制作方式选择", "当前可执行动作", "创作边界", "逐页制作与确认纪律", "学术论文报告的叙事与风格", "第一页（标题页）制作流程"]),
+        ],
+        "form-check": [("operations/PRESENTATION.md", ["PPT形式检查入口"])],
+        "evidence-check": [("operations/PRESENTATION.md", ["PPT证据核查入口"])],
+        "citation-redact": [("operations/PRESENTATION.md", ["PPT引用脱敏入口"])],
+    },
     "write": {
         "general": [
             (ROUTES["write"]["file"], ROUTES["write"]["sections"]),
@@ -303,8 +348,16 @@ def split_misses(misses):
     return required, optional
 
 
-def emit_query_profile(query, profiles, stage, output_format):
+def emit_query_profile(query, profiles, stage, output_format, subproject="", topic="auto", verbatim=False):
     sections = list(QUERY_STAGE_SECTIONS[stage])
+    private = subproject == "private"
+    if not private and stage in {"start", "evidence"}:
+        sections.append("科研代码证据")
+    topic = resolve_query_topic(query, subproject, topic)
+    if private and stage == "start":
+        sections.insert(0, "private 查询范围")
+    if topic == "metaphysics" and stage in {"start", "answer"}:
+        sections.append("private 五行命理问答")
     if stage == "start":
         for profile in profiles:
             sections.extend(QUERY_PROFILE_SECTIONS[profile])
@@ -316,12 +369,31 @@ def emit_query_profile(query, profiles, stage, output_format):
         text = f"--- 工程上下文(按元图派发) ---\n{context}\n\n{USE_TASK_EXECUTION_DISCIPLINE}\n{TASK_EXECUTION_BOUNDARY}\n{EXPERIENCE_TRIGGER_NOTICE}\n{rules}"
     else:
         text = rules
+    scope = {
+        "storage": "private" if private else "public",
+        "db": "private/graph.db" if private else "cross-domain/graph.db",
+        "log": "private/outputs/query-log.jsonl" if private else "academic/wiki/outputs/query-log.jsonl",
+        "workspace": "private/outputs/query" if private else "temp/query",
+        "local_only": private,
+    }
+    if private:
+        text = ("[query 范围] private；共用标准 query 阶段；宿主 Agent 本地执行。\n"
+                "图：private/graph.db；日志：private/outputs/query-log.jsonl；暂存：private/outputs/query/。\n"
+                "wg 查询与读取传 --subproject private；不跨公共库、不外发、不进入 clean/GitHub。\n\n" + text)
+    if topic == "metaphysics":
+        text = ("[query 主题] metaphysics；后续阶段及同主题追问显式传 --query-topic metaphysics；"
+                "宿主综合自身知识与 private 证据作答。\n\n" + text)
     backend_notice = ""
-    if agent_task.query_backend() == "api":
+    if not private and agent_task.query_backend() == "api":
         from llm_structured import configured_model
         backend_notice = f"阶段 {stage}：LLM=API（{configured_model()}）；输出须遵守当前任务卡并经既有校验。"
+    if not verbatim:
+        text = render_routed_text(text, shared_query_source=True)
     result = {
         "task": "query", "profile": "+".join(profiles), "profiles": profiles, "stage": stage, "query": query,
+        "query_scope": scope,
+        "query_topic": topic,
+        "backend": "agent" if private else agent_task.query_backend(),
         "sections": [label for label, _ in hits], "warnings": warnings,
         "backend_notice": backend_notice,
         "estimated_chars": len(text), "estimated_tokens": max(1, len(text) // 3), "prompt": text,
@@ -399,8 +471,103 @@ def resolve_ingest(route, args):
         return None, content, mode, 0
 
 
+def emit_ingest_context_warmup(args, content, mode, backend, output_format):
+    """Render the one-time ingest bootstrap from its compact engineering contract."""
+    if args.subproject == "private":
+        raise ValueError("ingest context warmup 仅覆盖公共域摄入，不适用于 private")
+    _nodes, _edges, capabilities, _contracts, _verification, _scripts, _untracked = (
+        load_engineering_graph()
+    )
+    contract = capabilities.get("ingest", {}).get("context_warmup")
+    if not isinstance(contract, dict):
+        raise ValueError("工程元图缺少 ingest context_warmup 契约")
+    schema = str(contract.get("schema") or "")
+    max_chars = int(contract.get("max_chars") or 0)
+    shared_rules = contract.get("shared_rules")
+    execution_rules = contract.get("execution_rules")
+    profiles = contract.get("profiles")
+    repeat_policy = str(contract.get("repeat_policy") or "")
+    if (
+        schema != "ingest-context-warmup-v1"
+        or max_chars <= 0
+        or not isinstance(shared_rules, list)
+        or not isinstance(execution_rules, list)
+        or not isinstance(profiles, dict)
+        or not repeat_policy
+    ):
+        raise ValueError("工程元图中的 ingest context_warmup 契约无效")
+
+    if args.source_kind == "meeting":
+        flow = "meeting"
+    elif content == "paper":
+        flow = "paper"
+    else:
+        flow = "document"
+    profile = profiles.get(flow)
+    if not isinstance(profile, dict):
+        raise ValueError(f"工程元图缺少 ingest context_warmup profile: {flow}")
+    profile = {**profile, **(profile.get("modes", {}).get(mode) or {})}
+
+    entrypoint = str(profile.get("entrypoint") or "").replace(
+        "<domain>", str(args.subproject)
+    )
+    scope = {
+        "subproject": args.subproject,
+        "mode": mode,
+        "content": content,
+        "source_kind": args.source_kind,
+        "stage": args.stage if mode == "create" else None,
+    }
+    contract_material = {
+        "contract": contract,
+        "profile": flow,
+        "scope": scope,
+        "backend": backend,
+    }
+    digest = hashlib.sha256(json.dumps(
+        contract_material, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()[:12]
+    payload = {
+        "schema": schema,
+        "warmed": True,
+        "receipt": f"{schema}:{digest}",
+        "context_scope": "current_conversation",
+        "scope": scope,
+        "flow": flow,
+        "backend": backend,
+        "control_owner": "host_agent" if backend == "agent" else "program",
+        "entrypoint": entrypoint,
+        "focus": str(profile.get("focus") or ""),
+        "state_machine": str(contract.get("state_machine") or ""),
+        "rules": [str(item) for item in [*shared_rules, *execution_rules]],
+        "repeat_policy": repeat_policy,
+    }
+    compact = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    if len(compact) > max_chars:
+        raise ValueError(
+            f"ingest context warmup 超出字符预算: {len(compact)} > {max_chars}"
+        )
+    if output_format == "json":
+        print(compact)
+        return payload
+
+    print("=== ingest context warmup ===")
+    print(f"receipt: {payload['receipt']}")
+    print(
+        f"scope: {args.subproject}/{mode}/{content}/{args.source_kind} "
+        f"stage={scope['stage']} backend={backend} flow={flow}"
+    )
+    print(f"entrypoint: {entrypoint}")
+    print(f"focus: {payload['focus']}")
+    print(f"state: {payload['state_machine']}")
+    for rule in payload["rules"]:
+        print(f"- {rule}")
+    print(f"repeat: {payload['repeat_policy']}")
+    return payload
+
+
 def emit_capability(name: str, profile: str) -> None:
-    """输出可在当前工作状态内组合的能力规范，不改变 task/state。"""
+    """输出可在当前工作状态内组合的能力规范，不创建或切换状态。"""
     profiles = CAPABILITY_ROUTES.get(name)
     if profiles is None or profile not in profiles:
         available = sorted(profiles or {})
@@ -441,38 +608,44 @@ def main():
     ap = argparse.ArgumentParser(description="按 task 分发规范 prompt")
     ap.add_argument("--task", help="任务类型(ingest/query/lint/sync/write/scan/inbox/hub/build/research/frontier)")
     ap.add_argument("--capability", choices=sorted(CAPABILITY_ROUTES),
-                    help="在当前 task/state 内按需加载的能力")
+                    help="在当前工作状态内按需加载的能力")
     ap.add_argument("--capability-profile", default="general",
-                    help="能力 profile（write: general/academic）")
-    ap.add_argument("--subproject", help="子项目(admin/teaching/business/private;cross-domain 跨域),ingest 时用（论文 PDF 走 ingest_paper.py playbook,不走 route.py；非inbox academic 论文走 ingest_paper.py --raw；private 物理隔离独立 graph.db）")
+                    help="能力 profile（write: general/academic；science-exhibit: create/discuss/resume；presentation: create/form-check/evidence-check/citation-redact）")
+    ap.add_argument("--subproject", help="ingest 目标域或 query 范围；private 使用隔离图及本地 Agent，不继承公共 API backend")
     ap.add_argument("--mode", help="ingest 模式: create(默认)/update/batch")
     ap.add_argument("--content", help="ingest 内容类型: paper(默认)/other")
     ap.add_argument("--source-kind", choices=["ordinary", "meeting"], default="ordinary",
                     help="ingest 来源类型: ordinary(默认)/meeting")
     ap.add_argument("--stage", type=int, help="ingest create 模式的 stage: 1/2/3")
-    ap.add_argument("--list", action="store_true", help="分类列出 task/state 与 capability")
+    ap.add_argument("--list", action="store_true", help="从统一功能注册表分类列出状态、任务与按需能力")
     ap.add_argument("--query", default="", help="query 任务的用户问题")
+    ap.add_argument("--query-topic", choices=["auto", "general", "metaphysics"], default="auto",
+                    help="private 查询主题；auto 匹配显式词，命理短句追问由宿主选择 metaphysics 并沿阶段传递")
     ap.add_argument("--profile", choices=["auto", *QUERY_PROFILE_SECTIONS], default="auto")
     ap.add_argument("--query-stage", choices=QUERY_STAGE_SECTIONS, default="start",
                     help="query 派发阶段: start(默认)/evidence/continue/answer")
     ap.add_argument("--format", choices=["text", "json"], default="text")
+    ap.add_argument("--context-warmup", action="store_true",
+                    help="仅 ingest：输出当前对话首次摄入使用的一次性紧凑预热回执")
     ap.add_argument("--full", action="store_true", help="query 任务输出完整规范(审阅/调试)")
+    ap.add_argument("--verbatim", action="store_true", help="query/ingest 当前路由输出未经压缩的原文（审阅/调试）")
     args = ap.parse_args()
 
+    if args.context_warmup and args.task != "ingest":
+        ap.error("--context-warmup 仅适用于 --task ingest")
+    if args.query_topic != "auto" and args.task != "query":
+        ap.error("--query-topic 仅适用于 --task query")
+    if args.query_topic == "metaphysics" and args.subproject != "private":
+        ap.error("query-topic=metaphysics requires --subproject private")
+
     if args.list:
-        print("可用 task/state（write 为兼容别名）:")
-        for k, v in ROUTES.items():
-            suffix = " [compat -> capability write/general]" if k == "write" else ""
-            print(f"  {k}: {v['file']}{suffix}")
-        print("可用 capability:")
-        for name, profiles in CAPABILITY_ROUTES.items():
-            print(f"  {name}: profiles={','.join(sorted(profiles))}")
+        print(fr.render_route_listing())
         return
 
 
     if args.capability:
         if args.task:
-            print("ERROR: --task 与 --capability 分别表示状态路由和按需能力，请分两次调用。", file=sys.stderr)
+            print("ERROR: --task 与 --capability 是两类独立入口，请分两次调用。", file=sys.stderr)
             sys.exit(1)
         emit_capability(args.capability, args.capability_profile)
         return
@@ -505,21 +678,32 @@ def main():
             print("ERROR: --stage 仅适用于 create ingest。", file=sys.stderr)
             sys.exit(1)
 
-    if args.task == "query" and not args.full:
+    if args.task == "query" and args.subproject not in {None, "", "public", "cross-domain", "academic", "admin", "teaching", "business", "private"}:
+        ap.error("unsupported query subproject")
+    if args.task == "query" and (not args.full or args.subproject == "private"):
         profiles = classify_query(args.query) if args.profile == "auto" else [args.profile]
-        emit_query_profile(args.query, profiles, args.query_stage, args.format)
+        emit_query_profile(args.query, profiles, args.query_stage, args.format, args.subproject, args.query_topic, args.verbatim)
         return
 
     # ===== ingest 特殊处理(stage 化) =====
     if args.task == "ingest":
         selected_stages, content, mode, total_stages = resolve_ingest(route, args)
+        backend = agent_task.ingest_backend()
+        if args.context_warmup:
+            try:
+                emit_ingest_context_warmup(
+                    args, content, mode, backend, args.format,
+                )
+            except ValueError as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                raise SystemExit(1)
+            return
         print(
             f"[ingest 路由] mode={mode}  content={content}  source-kind={args.source_kind}  "
             f"subproject={args.subproject or '(未指定)'}",
             file=sys.stderr,
         )
         notice_stage = args.stage if args.stage else None
-        backend = agent_task.ingest_backend()
         backend_notice = ""
         if backend == "api":
             from llm_structured import ingest_backend_notice
@@ -527,16 +711,22 @@ def main():
         if backend_notice:
             print(f"[ingest 后端] {backend_notice}", file=sys.stderr)
         if content == "paper" and args.subproject == "academic":
-            print(
-                "[ingest 重定向] academic 论文（非 inbox 来源）现已支持代码驱动流水线：\n"
-                "  python3 .scripts/ingest_paper.py --raw <raw/paper.md 路径>\n"
-                "复用 inbox 全流程（wiki 生成→语义槽→校验→命题→图→收尾），无需手动 stage 1/2/3。\n"
-                "下方 stage 任务卡仅在需手动介入或 agent 模式时参考。",
-                file=sys.stderr,
-            )
-            if backend == "api":
+            if mode == "update":
                 print(
-                    "[ingest API 后端] 当前 INGEST_BACKEND=api，--raw 模式全自动代码驱动。",
+                    "[ingest 更新] 已有 Wiki 的局部修订按下方 update 卡增量执行：\n"
+                    "  保留人工内容与未受影响的既有关系，暂存修订后经原 validator、Graph preflight 与增量提交。\n"
+                    "  仅正文/引用修订的合并预检：python3 .scripts/graph_ingest.py ingest --page <最终ID> "
+                    "--page-file <暂存Wiki> --metadata-only --validate-page --plan-only。\n"
+                    "  关系变化改用原语义输入；该预检不覆盖 Wiki，提交仍按 update 卡执行。\n"
+                    "  仅明确需要整篇重编译时使用 python3 .scripts/re_ingest.py --raw <raw/paper.md 路径>；\n"
+                    "  同版本重编译须在该入口显式给出 --force。",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "[ingest 入口] 新论文文件使用 python3 .scripts/wg.py ingest <file> --subproject academic；\n"
+                    "已归档 Raw 的整篇编译使用 python3 .scripts/re_ingest.py --raw <raw/paper.md 路径>。\n"
+                    "Agent 按返回的 workspace 继续，API 由对应 adapter 执行；共享原校验与提交。",
                     file=sys.stderr,
                 )
         if selected_stages:
@@ -601,11 +791,9 @@ def main():
                 for f, miss in optional:
                     print(f"WARN: 可选 section 未命中 {f} :: {miss}", file=sys.stderr)
 
-        # 输出
-        for label, content_text in all_hits:
-            print(f"--- {label} ---")
-            print(content_text)
-            print()
+        # Presentation only: raw hits/locators remain unchanged for auditing.
+        routed_text = "".join(f"--- {label} ---\n{content_text}\n\n" for label, content_text in all_hits)
+        print(routed_text if args.verbatim else render_routed_text(routed_text), end="")
 
         if all_misses:
             print("--- 未命中 section(可能已改名,请检查) ---", file=sys.stderr)

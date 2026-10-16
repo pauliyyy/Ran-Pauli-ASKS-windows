@@ -16,7 +16,7 @@ import platform_compat
 
 
 REPO = Path(__file__).resolve().parent.parent
-MIN_PYTHON = (3, 10)
+MIN_PYTHON = (3, 12)
 PYTHON_IMPORTS = {
     "PyYAML": "yaml",
     "numpy": "numpy",

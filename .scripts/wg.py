@@ -7,7 +7,7 @@
 - 自描述溯源：每个能力返回带 sources，可接 read-raw 核验事实
 - 渐进披露：默认只返回导航/关联层，省 token；要深挖用 read-section / read-raw
 
-底层全部复用现有脚本（query_graph.py / wiki_locator.py /
+底层全部复用现有脚本（query_graph.py / wiki_locator.py / cv.py /
 workspace_state.py / research_memory.py / query_actions.py / source_locator.py），本文件只做薄包统一。
 
 输出 envelope（stdout 一行 JSON）:
@@ -26,13 +26,24 @@ workspace_state.py / research_memory.py / query_actions.py / source_locator.py�
   wg.py remember <project> --title "..." --intent <intent> [--content "..." | --stdin] [--tags a,b]
   wg.py workspace recall <workspace>
   wg.py workspace item add <workspace> --title "..." --state active --next-action "..."
+  wg.py cv status --workspace <workspace>
+  wg.py cv render <edition> --workspace <workspace>
   wg.py ingest <file> --subproject admin [--allow-remote-ocr]
   wg.py ingest --resume <transaction-id>
+  wg.py task inspect <transaction-id>
+  wg.py task status <transaction-id>
+  wg.py task next <transaction-id>
+  wg.py task verify <transaction-id>
+  wg.py task advance <transaction-id>
+  wg.py task run <transaction-id> --task-command check|commit|resume|refresh|read
   wg.py abbr <term>
   wg.py frontier ask "<academic question>"
   wg.py frontier list
   wg.py frontier show <ID>
   wg.py frontier answer <ID>
+  wg.py functions list
+  wg.py functions show knowledge.query
+  wg.py functions resolve knowledge.query --caller main_agent --backend agent
 """
 from __future__ import annotations
 
@@ -51,6 +62,9 @@ import source_locator as sl
 import wiki_locator as wl
 import graph_lib as gl
 import query_actions as qa
+import function_registry as fr
+import agent_task
+import inbox_state
 
 RAW_PREVIEW_CHARS = 6000
 
@@ -94,7 +108,8 @@ def extract_last_json(text: str) -> dict:
 
 
 def query_graph_json(cmd: str, pos_args: list[str], opts: list[str] | None = None) -> dict:
-    args = ["python3", str(SCRIPTS / "query_graph.py"), cmd, *pos_args, "--json"]
+    args = [sys.executable, str(SCRIPTS / "query_graph.py"), cmd, *pos_args, "--json",
+            "--db", str(qa.query_db_path())]
     if opts:
         args.extend(opts)
     rc, out, err = run_script(args)
@@ -124,7 +139,8 @@ def collect_sources_from_edges(obj: dict) -> list[str]:
 
 
 def cmd_lookup(args):
-    res = query_graph_json("search", [args.term])
+    opts = ["--include-deprecated"] if getattr(args, "include_deprecated", False) else []
+    res = query_graph_json("search", [args.term], opts)
     if "_error" in res:
         return envelope("lookup", None, status="error", error=res["_error"])
     hits = res.get("nodes") or res.get("results") or []
@@ -134,7 +150,12 @@ def cmd_lookup(args):
 
 
 def cmd_neighbors(args):
-    res = query_graph_json("neighbors", [args.page], ["--depth", str(args.depth)])
+    opts = ["--depth", str(args.depth)]
+    for name in ("max_nodes", "max_edges", "max_scanned_rows", "top_k"):
+        value = getattr(args, name, None)
+        if value is not None:
+            opts += ["--" + name.replace("_", "-"), str(value)]
+    res = query_graph_json("neighbors", [args.page], opts)
     if "_error" in res:
         return envelope("neighbors", None, status="error", error=res["_error"])
     srcs = collect_sources_from_edges(res)
@@ -158,7 +179,8 @@ def cmd_hub_of(args):
 
 
 def cmd_abbr(args):
-    res = query_graph_json("search", [args.term])
+    opts = ["--include-deprecated"] if getattr(args, "include_deprecated", False) else []
+    res = query_graph_json("search", [args.term], opts)
     if "_error" in res:
         return envelope("abbr", None, status="error", error=res["_error"])
     nodes = res.get("nodes", [])
@@ -179,7 +201,7 @@ def cmd_read_section(args):
             )
             sources = result["wiki"]["raw_citations"]
         else:
-            result = wl.read_wiki_locator(args.page, args.section or "")
+            result = qa.read_wiki_data(args.page, args.section or "")
             sources = result["raw_citations"]
     except (FileNotFoundError, ValueError, KeyError) as exc:
         return envelope("read-section", None, status="error", error=str(exc))
@@ -188,7 +210,8 @@ def cmd_read_section(args):
 
 
 def cmd_hybrid_recall(args):
-    text, _tokens = qa.hybrid_recall(args.query, args.intent, args.domain, str(args.topk))
+    text, _tokens = qa.hybrid_recall(args.query, args.intent, args.domain, str(args.topk),
+                                    include_deprecated=args.include_deprecated)
     if text.startswith("[ERROR"):
         return envelope("hybrid-recall", None, status="error", error=text)
     return envelope("hybrid-recall", json.loads(text), status="ok")
@@ -203,33 +226,45 @@ def cmd_read_raw(args):
     if target is None:
         return envelope("read-raw", {"locator": raw}, status="error",
                         error=f"raw 路径未解析: {path_part}")
-    rel = str(target.resolve().relative_to(REPO)) if target.is_absolute() else str(target)
+    qa.check_path_scope(target)
+    requested_rel = str(target.resolve().relative_to(REPO)) if target.is_absolute() else str(target)
     if not loc or loc == "全篇":
-        return envelope("read-raw", {"locator": raw, "path": rel}, status="error",
+        return envelope("read-raw", {"locator": raw, "path": requested_rel}, status="error",
                         error="read-raw 需要精确 locator（标题、Lx-Ly 或 page-x-y）；不向 LLM 返回全文")
-    status = sl.locator_status(loc, target)
-    result = {"locator": raw, "path": rel, "section": loc,
+    companion_binding = sl.companion_binding_for_target(target)
+    if companion_binding and companion_binding["status"] == "invalid":
+        return envelope(
+            "read-raw", {"locator": raw, "path": requested_rel,
+                         "companion_binding": companion_binding}, status="error", ok=False,
+            error="companion 与原件绑定失效，须重新生成后再查询",
+        )
+    source_target, read_target = sl.evidence_targets(target, loc)
+    qa.check_path_scope(source_target)
+    qa.check_path_scope(read_target)
+    source_rel = str(source_target.resolve().relative_to(REPO))
+    read_rel = str(read_target.resolve().relative_to(REPO))
+    status = sl.locator_status(loc, read_target)
+    result = {"locator": raw, "path": source_rel, "source_path": source_rel,
+              "read_path": read_rel, "evidence_locator": f"{read_rel}#{loc}", "section": loc,
               "locator_status": status,
-              "is_binary": target.suffix.lower() in sl.BINARY_SUFFIXES}
+              "companion_binding": companion_binding,
+              "is_binary": source_target.suffix.lower() in sl.BINARY_SUFFIXES}
     if status == "missing":
-        return envelope("read-raw", result, sources=[rel], status="empty", ok=False,
-                        error=f"locator '{loc}' 在 {rel} 中未找到")
-    seg = sl.read_locator_text(target, loc)
-    if seg is None and result["is_binary"]:
-        result["note"] = "原始材料没有可机械返回的 locator 文本；请读取同目录 Markdown companion。"
-        return envelope("read-raw", result, sources=[rel], status="ok")
+        return envelope("read-raw", result, sources=[source_rel], status="empty", ok=False,
+                        error=f"locator '{loc}' 在 {read_rel} 中未找到")
+    seg = sl.read_locator_text(read_target, loc)
     if seg is None:
-        return envelope("read-raw", result, sources=[rel], status="empty", ok=False,
+        return envelope("read-raw", result, sources=[source_rel], status="empty", ok=False,
                         error=f"locator '{loc}' 已验证但无法精确截取；未返回全文")
     if len(seg) > RAW_PREVIEW_CHARS:
-        return envelope("read-raw", result, sources=[rel], status="error", ok=False,
+        return envelope("read-raw", result, sources=[source_rel], status="error", ok=False,
                         error=f"locator '{loc}' 命中 {len(seg)} 字符，范围过大；请细化 locator，未返回半截内容")
     result["text"] = seg
-    return envelope("read-raw", result, sources=[rel], status="ok")
+    return envelope("read-raw", result, sources=[source_rel], status="ok")
 
 
 def cmd_recall(args):
-    rc, out, err = run_script(["python3", str(SCRIPTS / "research_memory.py"),
+    rc, out, err = run_script([sys.executable, str(SCRIPTS / "research_memory.py"),
                                "recall", args.project])
     if rc != 0:
         return envelope("recall", None, status="error",
@@ -246,7 +281,7 @@ def cmd_ingest(args):
                         error="必须且只能提供一个 file、--stdin 或 --resume")
     if keep_source and not args.file:
         return envelope("ingest", None, status="error", error="--keep-source 只能用于文件附件")
-    command = ["python3", str(SCRIPTS / "ingest_inbox.py"), "--run"]
+    command = [sys.executable, str(SCRIPTS / "ingest_inbox.py"), "--run"]
     input_options = {}
     if args.resume:
         command.extend(["--resume", args.resume])
@@ -277,6 +312,8 @@ def cmd_ingest(args):
             command.extend(["--document-type", args.document_type])
     if args.ocr_result:
         command.extend(["--ocr-result", args.ocr_result])
+    if getattr(args, "allow_remote_ppt", False):
+        command.append("--allow-remote-ppt")
     if args.allow_remote_ocr:
         command.append("--allow-remote-ocr")
     rc, out, err = run_script(command, cwd=REPO, **input_options)
@@ -292,11 +329,139 @@ def cmd_ingest(args):
     for key in ("raw_dir", "wiki_path"):
         if result.get(key) and result[key] not in sources:
             sources.append(result[key])
-    failed = result.get("status") in {"failed", "validation_error", "backend_mismatch"}
-    if rc != 0 and failed:
+    inner_status = str(result.get("status") or "").strip().lower()
+    completed = inner_status in {"completed", "duplicate_found"}
+    if rc != 0 or not completed:
+        detail = result.get("errors") or result.get("error")
+        if not detail:
+            detail = (err or (
+                f"摄入子进程退出码 {rc}" if rc != 0
+                else f"摄入未完成: {inner_status or 'missing_status'}"
+            )).strip()
         return envelope("ingest", result, sources=sources, status="error",
-                        error=str(result.get("errors") or result.get("error") or "摄入失败")[:500])
+                        error=str(detail)[:500])
     return envelope("ingest", result, sources=sources, status="ok")
+
+
+def _task_execution_payload(execution: dict) -> dict:
+    parsed = extract_last_json(execution.get("stdout", ""))
+    return {
+        "action": execution["action"],
+        "returncode": execution["returncode"],
+        "command": execution["command"],
+        "environment_overrides": execution["environment_overrides"],
+        "result": parsed,
+        "error": "" if parsed else (execution.get("stderr") or execution.get("stdout") or "受管 action 未返回 JSON").strip()[:500],
+    }
+
+
+def _run_task_action(state: dict, action: str) -> dict:
+    return _task_execution_payload(agent_task.run_action(state, action, REPO))
+
+
+def cmd_task(args):
+    """Expose one content-agnostic host loop for persisted Agent tasks."""
+    state = inbox_state.load(args.transaction_id)
+    if not state:
+        return envelope(
+            f"task.{args.task_action}", None, status="error",
+            error=f"事务不存在: {args.transaction_id}",
+        )
+    if args.task_action == "status":
+        return envelope("task.status", inbox_state.operation_view(state, REPO))
+    if args.task_action == "verify":
+        receipt = inbox_state.verify_receipt(state, REPO)
+        if receipt["status"] == "PASS":
+            return envelope("task.verify", receipt)
+        return envelope(
+            "task.verify", receipt,
+            status="empty" if receipt["status"] == "INCOMPLETE" else "error",
+            ok=False,
+            error=str(receipt.get("error") or "事务尚未形成可验证的最终回执"),
+        )
+    if args.task_action == "next":
+        operation = inbox_state.operation_view(state, REPO)
+        result = {
+            "schema": "ingest-next-action-v1",
+            "transaction_id": operation["transaction_id"],
+            "workflow_status": operation["workflow_status"],
+            "internal_status": operation["internal_status"],
+            "next_action": operation["next_action"],
+            "allowed_actions": operation["allowed_actions"],
+            "artifact_refs": operation["artifact_refs"],
+        }
+        if isinstance(state.get("agent_task"), dict):
+            try:
+                control = agent_task.control_view(state, REPO)
+            except ValueError as exc:
+                return envelope("task.next", result, status="error", error=str(exc))
+            result["next_action"] = control["next_action"]
+            result["missing_outputs"] = control["missing_outputs"]
+        return envelope("task.next", result)
+    try:
+        view = agent_task.control_view(state, REPO)
+    except ValueError as exc:
+        return envelope(f"task.{args.task_action}", None, status="error", error=str(exc))
+    if args.task_action == "inspect":
+        return envelope("task.inspect", view)
+    if view["workflow_status"] in {"completed", "failed"}:
+        return envelope(f"task.{args.task_action}", {"control": view, "executions": []})
+    reading_only = args.task_action == "run" and args.task_command == "read"
+    if view["missing_outputs"] and not reading_only:
+        return envelope(
+            f"task.{args.task_action}", {"control": view, "executions": []},
+            status="empty", ok=False,
+            error="请先写完 task.outputs 中的 required 暂存产物",
+        )
+
+    commands = (view["task"].get("commands") or {})
+    executions = []
+    try:
+        if args.task_action == "advance":
+            if "check" in commands:
+                checked = _run_task_action(state, "check")
+                executions.append(checked)
+                checked_result = checked.get("result") or {}
+                ready = (
+                    checked_result.get("workflow_status") == "ready_to_commit"
+                    or checked_result.get("status") == "ready_to_commit"
+                )
+                if not ready or checked["returncode"] != 0:
+                    return envelope("task.advance", {
+                        "control": view, "executions": executions,
+                        "next_action": "repair_outputs" if checked_result else "inspect_error",
+                    }, status="ok" if checked_result else "error",
+                    error=checked.get("error", ""))
+                if "commit" in commands:
+                    executions.append(_run_task_action(state, "commit"))
+            elif "resume" in commands:
+                executions.append(_run_task_action(state, "resume"))
+            elif "commit" in commands:
+                executions.append(_run_task_action(state, "commit"))
+            else:
+                return envelope("task.advance", {"control": view, "executions": []},
+                                status="error", error="任务未声明可推进的受管 action")
+        else:
+            action = args.task_command
+            if action == "read":
+                executions.append(_run_task_action(state, "read"))
+            else:
+                executions.append(_run_task_action(state, action))
+    except ValueError as exc:
+        return envelope(f"task.{args.task_action}", {
+            "control": view, "executions": executions,
+        }, status="error", error=str(exc))
+
+    refreshed = inbox_state.load(args.transaction_id) or state
+    refreshed_view = agent_task.control_view(refreshed, REPO)
+    last = executions[-1] if executions else {}
+    failed = last.get("returncode", 0) != 0 or bool(last.get("error"))
+    return envelope(
+        f"task.{args.task_action}",
+        {"control": refreshed_view, "executions": executions},
+        status="error" if failed else "ok",
+        error=last.get("error", "") if failed else "",
+    )
 
 
 def cmd_remember(args):
@@ -304,7 +469,7 @@ def cmd_remember(args):
         content = sys.stdin.read()
     else:
         content = args.content or ""
-    cmd = ["python3", str(SCRIPTS / "research_memory.py"), "add",
+    cmd = [sys.executable, str(SCRIPTS / "research_memory.py"), "add",
            args.project, "--title", args.title, "--intent", args.intent]
     if content:
         cmd += ["--content", content]
@@ -318,9 +483,16 @@ def cmd_remember(args):
                     sources=[], status="ok")
 
 
+def cmd_oral(args):
+    import oral_exam
+    parsed = oral_exam.build_parser().parse_args(args.oral_args)
+    result = oral_exam.run(parsed)
+    return envelope("oral", result, status="ok" if result.get("ok") else "error", ok=result.get("ok", True))
+
+
 def cmd_workspace(args):
     """Generic workspace-state thin wrapper; the target script owns its schema."""
-    command = ["python3", str(SCRIPTS / "workspace_state.py"), *args.workspace_args]
+    command = [sys.executable, str(SCRIPTS / "workspace_state.py"), *args.workspace_args]
     rc, out, err = run_script(command)
     if rc != 0:
         try:
@@ -344,9 +516,51 @@ def cmd_workspace(args):
                     error="" if ok else "workspace doctor reported errors")
 
 
+def cmd_library_or_graph(args):
+    """Expose deterministic functions through the standard WG result envelope."""
+    if args.cmd == 'slide-library':
+        script, forwarded = 'slide_library.py', args.library_args
+    else:
+        script, forwarded = 'graph_visualize.py', []
+        for field in ('output','graph','node','query','radius','max_nodes','max_edges','predicates','types','dpi'):
+            value = getattr(args, field, None)
+            if value is not None:
+                forwarded.extend(['--'+field.replace('_','-'), str(value)])
+        forwarded.extend('--'+field for field in ('html','sim','open') if getattr(args,field,False))
+    rc,out,err = run_script([sys.executable,str(SCRIPTS/script),*forwarded])
+    try:
+        result = json.loads(out)
+    except json.JSONDecodeError:
+        return envelope(args.cmd, None, status='error', error=(err or out or 'No JSON result').strip()[:500])
+    failed = rc != 0 or (isinstance(result,dict) and result.get('status') == 'error')
+    sources = []
+    if isinstance(result,dict):
+        sources = list(result.get('sources', []))
+        sources.extend(result[k] for k in ('source','manifest') if isinstance(result.get(k),str))
+    return envelope(args.cmd,result,sources=sources,status='error' if failed else 'ok',ok=not failed,
+                    error=(result.get('error') or err.strip())[:500] if failed and isinstance(result,dict) else '')
+
+
+def cmd_cv(args):
+    """Thin wrapper around the deterministic CV workspace function."""
+    command = [sys.executable, str(SCRIPTS / "cv.py"), *args.cv_args]
+    rc, out, err = run_script(command)
+    try:
+        result = json.loads(out.strip())
+    except json.JSONDecodeError:
+        return envelope("cv", None, status="error",
+                        error=(err or out or "cv.py returned no JSON").strip()[:500])
+    sources = [value for key in ("source", "manifest", "artifact")
+               if isinstance((value := result.get(key)), str) and value]
+    failed = rc != 0 or result.get("status") in {"error", "blocked"}
+    return envelope("cv", {"command": args.cv_args, "output": result},
+                    sources=sources, status="error" if failed else "ok", ok=not failed,
+                    error=(result.get("error") or err.strip())[:500] if failed else "")
+
+
 def cmd_frontier(args):
     """Frontier 薄包；主逻辑和准入契约只定义在 frontier.py。"""
-    cmd = ["python3", str(SCRIPTS / "frontier.py"), args.frontier_cmd]
+    cmd = [sys.executable, str(SCRIPTS / "frontier.py"), args.frontier_cmd]
     if args.frontier_cmd == "ask":
         cmd += ["--question", args.question, "--topk", str(args.topk)]
         if args.no_ai:
@@ -387,15 +601,100 @@ def cmd_frontier(args):
                     status="empty" if isinstance(result, dict) and result.get("count") == 0 else "ok")
 
 
+def cmd_functions(args):
+    """Expose catalog discovery and policy resolution, never generic execution."""
+    if args.functions_cmd == "list":
+        result = fr.catalog(
+            audience=args.audience,
+            kind=args.kind,
+            include_internal=args.include_internal,
+        )
+    elif args.functions_cmd == "show":
+        result = fr.show(args.function_id)
+    elif args.functions_cmd == "resolve":
+        result = fr.resolve(
+            args.function_id,
+            caller=args.caller,
+            backend=args.backend,
+            state=args.state,
+        )
+    else:
+        errors = fr.validate_runtime() if args.runtime else fr.validate_registry()
+        result = {
+            "schema": "function-registry-validation-v1",
+            "status": "error" if errors else "ok",
+            "errors": errors,
+        }
+        if errors:
+            return envelope(
+                "functions", result,
+                sources=[str(fr.REGISTRY_PATH.relative_to(REPO))],
+                status="error", error="; ".join(errors),
+            )
+    return envelope(
+        "functions", result,
+        sources=[str(fr.REGISTRY_PATH.relative_to(REPO))],
+    )
+
+
+def cmd_code_run(args):
+    code, output, error = run_script([sys.executable, str(SCRIPTS / "code_run.py"), *args.run_args])
+    try:
+        result = json.loads(output)
+    except json.JSONDecodeError:
+        return envelope("code-run", None, status="error", error=(error or output).strip()[:500])
+    failed = code != 0 or not result.get("ok", False)
+    return envelope("code-run", result, sources=[], status="error" if failed else "ok", ok=not failed,
+                    error=result.get("error", error.strip())[:500] if failed else "")
+
+
+def cmd_code_library(args):
+    code, output, error = run_script([sys.executable, str(SCRIPTS / "code_library.py"), *args.library_args])
+    try:
+        result = json.loads(output)
+    except json.JSONDecodeError:
+        return envelope("code-library", None, status="error", error=(error or output).strip()[:500])
+    failed = code != 0 or not result.get("ok", False)
+    return envelope("code-library", result, sources=result.get("sources", []),
+                    status="error" if failed else "ok", ok=not failed,
+                    error=result.get("error", error.strip())[:500] if failed else "")
+
+
+def cmd_science_exhibit(args):
+    code, output, error = run_script([sys.executable, str(SCRIPTS / "science_exhibit.py"), *args.exhibit_args])
+    try:
+        result = json.loads(output)
+    except json.JSONDecodeError:
+        return envelope("science-exhibit", None, status="error", error=(error or output).strip()[:500])
+    failed = code != 0 or result.get("status") == "error"
+    return envelope("science-exhibit", result, status="error" if failed else "ok", ok=not failed,
+                    error=result.get("error", error.strip())[:500] if failed else "")
+
+
+def cmd_extract_data(args):
+    code, output, error = run_script([sys.executable, str(SCRIPTS / "extract_data.py"), *args.extract_args])
+    try:
+        result = json.loads(output)
+    except json.JSONDecodeError:
+        return envelope("extract-data", None, status="error", error=(error or output).strip()[:500])
+    failed = code != 0 or result.get("status") == "error"
+    return envelope("extract-data", result, sources=[result["source_path"]] if result.get("source_path") else [],
+                    status="error" if failed else "ok", ok=not failed,
+                    error=result.get("error", error.strip())[:500] if failed else "")
+
+
 def build_parser():
     ap = argparse.ArgumentParser(prog="wg.py", description="WikiGraph 能力面")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("lookup", help="关键词查节点（导航层）")
+    p.add_argument("--include-deprecated", action="store_true", help="显式历史查询时包含废弃页")
     p.add_argument("term"); p.set_defaults(func=cmd_lookup)
 
     p = sub.add_parser("neighbors", help="节点关联召回 BFS")
     p.add_argument("page"); p.add_argument("--depth", type=int, default=2)
+    for name in ("max-nodes", "max-edges", "max-scanned-rows", "top-k"):
+        p.add_argument("--" + name, type=int, default=None)
     p.set_defaults(func=cmd_neighbors)
 
     p = sub.add_parser("relations", help="节点关系边（可按谓词）")
@@ -406,6 +705,7 @@ def build_parser():
     p.add_argument("page"); p.set_defaults(func=cmd_hub_of)
 
     p = sub.add_parser("abbr", help="缩写解析（导航层）")
+    p.add_argument("--include-deprecated", action="store_true", help="显式历史查询时包含废弃页")
     p.add_argument("term"); p.set_defaults(func=cmd_abbr)
 
     p = sub.add_parser("read-section", help="按 heading slug 读 wiki 页及该节 Raw 引用")
@@ -421,8 +721,9 @@ def build_parser():
     p.add_argument("query")
     p.add_argument("--intent", default="exploration",
                    choices=("fact", "relation", "explanation", "exploration", "lineage"))
-    p.add_argument("--domain", default="", choices=("", "academic", "admin", "teaching", "business"))
+    p.add_argument("--domain", default="", choices=("", "academic", "admin", "teaching", "business", "private"))
     p.add_argument("--topk", type=int, default=8)
+    p.add_argument("--include-deprecated", action="store_true", help="仅显式历史版本查询时包含废弃页")
     p.set_defaults(func=cmd_hybrid_recall)
 
     p = sub.add_parser("read-raw", help="按 locator 读 raw 片段溯源核验")
@@ -442,9 +743,21 @@ def build_parser():
     p.add_argument("--document-type", default="",
                    choices=("", "editorial", "academic-reference", "conference-summary"))
     p.add_argument("--ocr-result", default="", help="已有源绑定 OCR JSON 回执")
+    p.add_argument("--allow-remote-ppt", action="store_true", help="显式授权所选PPTX的API内容识读")
     p.add_argument("--allow-remote-ocr", action="store_true",
                    help="显式授权单张图片上传 GLM OCR API")
     p.set_defaults(func=cmd_ingest)
+
+    p = sub.add_parser("task", help="摄入事务只读状态/校验与跨 Agent 受管推进入口")
+    p.add_argument(
+        "task_action",
+        choices=("inspect", "status", "next", "verify", "advance", "run"),
+    )
+    p.add_argument("transaction_id")
+    p.add_argument("--task-command", default="read",
+                   choices=("read", "check", "commit", "resume", "refresh"),
+                   help="task run 时执行任务显式声明的受管 action")
+    p.set_defaults(func=cmd_task)
 
     p = sub.add_parser("remember", help="研究记忆沉淀")
     p.add_argument("project"); p.add_argument("--title", required=True)
@@ -458,6 +771,15 @@ def build_parser():
     p.add_argument("workspace_args", nargs=argparse.REMAINDER,
                    help="传给 workspace_state.py 的子命令与参数")
     p.set_defaults(func=cmd_workspace)
+
+    p = sub.add_parser("oral", help="智能口试：准备方案、显式状态、完整记录和受管 Agent/API 回合")
+    p.add_argument("oral_args", nargs=argparse.REMAINDER)
+    p.set_defaults(func=cmd_oral)
+
+    p = sub.add_parser("cv", help="简历状态、校验、日期版本生成与差异比较")
+    p.add_argument("cv_args", nargs=argparse.REMAINDER,
+                   help="传给 cv.py 的子命令与参数")
+    p.set_defaults(func=cmd_cv)
 
     p = sub.add_parser("frontier", help="研究前沿 Question/Trajectory")
     frontier_sub = p.add_subparsers(dest="frontier_cmd", required=True)
@@ -500,6 +822,54 @@ def build_parser():
     fp.add_argument("--no-answer", action="store_true")
     fp.set_defaults(func=cmd_frontier)
 
+    p = sub.add_parser('slide-library', help='PPT模板管理与复用')
+    p.add_argument('library_args', nargs=argparse.REMAINDER)
+    p.set_defaults(func=cmd_library_or_graph)
+    p = sub.add_parser("science-exhibit", help="论文到公众科普展板：源绑定创作、局部修订与本地草稿导出")
+    p.add_argument("exhibit_args", nargs=argparse.REMAINDER)
+    p.set_defaults(func=cmd_science_exhibit)
+    p = sub.add_parser("extract-data", help="离线图片曲线/散点数据提取：准备、校准检查与数字化")
+    p.add_argument("extract_args", nargs=argparse.REMAINDER)
+    p.set_defaults(func=cmd_extract_data)
+    p = sub.add_parser("code-library", help="科研代码能力元图：只读检索、关系上下文与精确证据读取")
+    p.add_argument("library_args", nargs=argparse.REMAINDER)
+    p.set_defaults(func=cmd_code_library)
+    p = sub.add_parser("code-run", help="显式固定 CPU 检查与只读运行回执；不是通用执行器")
+    p.add_argument("run_args", nargs=argparse.REMAINDER)
+    p.set_defaults(func=cmd_code_run)
+    import graph_visualize
+    p = sub.add_parser('graph-visualize', parents=[graph_visualize.parser(add_help=False)],
+                       help='按主题或节点生成有向知识图及来源清单')
+    p.set_defaults(func=cmd_library_or_graph)
+
+    p = sub.add_parser("functions", help="统一功能、工作状态和调用策略目录")
+    functions_sub = p.add_subparsers(dest="functions_cmd", required=True)
+
+    fp = functions_sub.add_parser("list", help="列出功能")
+    fp.add_argument("--audience", choices=sorted(fr.VALID_AUDIENCE), default="")
+    fp.add_argument("--kind", choices=sorted(fr.VALID_KINDS), default="")
+    fp.add_argument("--include-internal", action="store_true")
+    fp.set_defaults(func=cmd_functions)
+
+    fp = functions_sub.add_parser("show", help="查看一个 canonical 功能")
+    fp.add_argument("function_id")
+    fp.set_defaults(func=cmd_functions)
+
+    fp = functions_sub.add_parser("resolve", help="按调用者、后端和工作状态解析可用入口")
+    fp.add_argument("function_id")
+    fp.add_argument("--caller", required=True, choices=sorted(fr.VALID_CALLERS))
+    fp.add_argument("--backend", required=True, choices=sorted(fr.VALID_BACKENDS))
+    fp.add_argument("--state", default="", help="工作状态类型 ID")
+    fp.set_defaults(func=cmd_functions)
+
+    fp = functions_sub.add_parser("validate", help="校验功能注册表")
+    fp.add_argument("--runtime", action="store_true")
+    fp.set_defaults(func=cmd_functions)
+
+    for name in ("lookup", "neighbors", "relations", "hub-of", "abbr", "read-section", "hybrid-recall", "read-raw"):
+        sub.choices[name].add_argument("--subproject", default="",
+            choices=("public", "academic", "admin", "teaching", "business", "private"),
+            help="查询存储范围；private 仅访问隔离子库，空值按明确路径推断，否则使用公共库")
     return ap
 
 
@@ -507,6 +877,15 @@ def main(argv=None):
     ap = build_parser()
     args = ap.parse_args(argv)
     try:
+        if hasattr(args, "subproject") and args.cmd in {
+                "lookup", "neighbors", "relations", "hub-of", "abbr", "read-section", "hybrid-recall", "read-raw"}:
+            paths = [getattr(args, key, "") for key in ("page", "locator")]
+            scope = qa.scope_for(args.subproject or getattr(args, "domain", ""), *paths)
+            with qa.query_scope(scope):
+                for path in paths:
+                    if path:
+                        qa.check_path_scope(path)
+                return args.func(args)
         return args.func(args)
     except Exception as e:
         return envelope(args.cmd, None, status="error",

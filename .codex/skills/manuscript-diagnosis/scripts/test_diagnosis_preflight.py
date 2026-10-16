@@ -163,7 +163,17 @@ class DiagnosisIntegrationTest(unittest.TestCase):
         for name in files:
             path = (SKILL / name).relative_to(REPO).as_posix()
             self.assertIn(path, manifest["include"])
-        self.assertFalse(any(p.startswith("projects/") for p in manifest["include"]))
+        # Generic source templates are public; manuscript instances and local styles stay private.
+        public_template_files = {
+            "AGENTS.md", "README.md", "schema.yaml", "notes/status.md", "outputs/.gitkeep",
+            "codes/README.md", "codes/docs/README.md", "codes/docs/PHYSICS.md",
+            "codes/analysis/README.md", "codes/experiments/README.md", "codes/tests/README.md",
+        }
+        self.assertEqual(
+            {path for path in manifest["include"] if path.startswith("projects/")},
+            {"projects/_templates/research/" + path for path in public_template_files},
+        )
+        self.assertFalse(any(path.startswith("projects/稿件诊断/") for path in manifest["include"]))
 
     def test_skill_is_not_git_ignored(self):
         # Public build directories may not yet have Git metadata.

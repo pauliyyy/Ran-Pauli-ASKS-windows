@@ -37,6 +37,84 @@ configuration. These are compatible ingestion extensions and fixes, not a new
 paper experiment or artifact. Both the Markdown and appended PDF pages contain
 the same addendum; previously reviewed PDF pages are retained.
 
+The 2026-09-23 `v0.7.0` addendum covers the canonical runtime function
+registry, explicit separation of persistent states from one-shot functions,
+native presentation authoring, and template-driven CV generation whose facts
+remain governed by Raw evidence. The public release includes an anonymous CV
+template package but no personal records or generated CV editions. It also
+records compatible extraction, ingestion-recovery, graph-validation, and
+engineering-analysis hardening. This update does not change a frozen paper
+artifact; the PDF retains its reviewed earlier pages and appends the same
+engineering update.
+
+The 2026-09-26 `v0.8.0` addendum covers persistent Agent-task handoff for
+prepared ingestion transactions, physically isolated private ingestion and
+query, separate structural and visual processing for native presentations,
+reusable slide components, governed editable artwork, and explicit provider API
+paths. These are backward-compatible workflow and configuration capabilities,
+so they receive a MINOR increment. The public tree contains generic isolation
+code and synthetic tests, not private knowledge. The update changes no frozen
+paper artifact; the PDF retains its reviewed earlier pages and appends the same
+engineering update.
+
+The 2026-09-26 `v0.9.0` addendum makes public publication reproducible from an
+explicit committed source snapshot. It adds release provenance, transactional
+clean-tree installation with rollback, remote/branch/divergence guards,
+post-push commit confirmation, GitHub-side verification, mechanical PDF page
+health checks, and bilingual changelog/version rationales. This is a compatible
+engineering and publication capability and does not change any frozen paper
+artifact or authorize a tag/GitHub Release.
+
+The 2026-09-26 `v0.9.1` patch exposes uncaught public-release regression
+tracebacks as machine-readable GitHub Actions annotations. This improves CI
+diagnosis without changing the knowledge model, ingestion contracts, or frozen
+paper artifacts. The Markdown introduction records this patch; the PDF remains
+the reviewed `v0.9.0` edition.
+
+The 2026-09-26 `v0.9.2` patch adds pinned NumPy and Pillow dependencies to the
+GitHub Actions verification environment so runtime function-registry imports
+can be validated on a fresh Python 3.12 runner. This is a CI dependency fix
+only; the PDF remains the reviewed `v0.9.0` edition.
+
+The 2026-09-26 `v0.9.3` patch adds pinned python-pptx for the editable-
+presentation tool imported by runtime function-registry validation. This is a
+CI dependency fix only; the PDF remains the reviewed `v0.9.0` edition.
+
+The 2026-09-26 `v0.10.0` update establishes public governance for independently
+maintained Community Downstreams, evaluated ASKS-Compatible status, and later
+explicit Reference Distribution designation. It also documents the current
+GitHub contribution round trip through the governed source repository. Ran-ASKS
+designates no official domain distribution, and this release does not promise a
+plugin API or Extension Contract. The Markdown and appended PDF page contain
+the same governance update; frozen paper artifacts remain unchanged.
+
+The 2026-10-03 `v0.11.0` update adds bounded, read-only knowledge graph
+visualization, governed slide-template reuse, expanded presentation production
+modes, and stronger evidence-bound meeting ingestion and maintenance recovery.
+Raw remains the factual authority; visualization remains navigation rather than
+evidence, and reusable slide receipts do not imply automatic visual approval.
+The Markdown and appended PDF page contain the same update; frozen paper
+artifacts remain unchanged.
+
+The 2026-10-04 `v0.12.0` update establishes a reproducible first-run and
+verification baseline: an installable `ran-asks` command, a committed `uv`
+lockfile, offline diagnostics, a synthetic Graph-to-Wiki-to-source demo,
+profiled test suites, provider examples, and explicit prompt-injection and data-
+plane threat boundaries. CI installs from the frozen lockfile. Starting with
+this version, every published public-tree version receives an immutable
+annotated Git tag; creating a GitHub Release remains separately authorized.
+The Markdown and appended PDF page contain the same update; frozen paper
+artifacts remain unchanged.
+
+The 2026-10-07 `v0.13.0` update strengthens Agent-mode paper ingestion with a
+single versioned bibliographic/Wiki/semantic workspace, bounded source-line
+evidence for bibliographic values, adaptive section reading, explicit semantic
+predicate roles, and transaction-bound validation and commit handoff. It also
+adds fail-closed inbox-classification evidence checks and persistent reviewed
+concept-identity distinctions. These backward-compatible capabilities do not
+change the Raw/Wiki/Graph boundary or any frozen paper artifact. The Markdown
+and appended PDF page contain the same update.
+
 | Content described in the introduction | Ran-ASKS boundary | Paper artifact | Status |
 | --- | --- | --- | --- |
 | Core method and 56-paper chronological demonstration | `v0.2.0` | `1.0.0` | Frozen arXiv v1 boundary for arXiv:2608.29612 |
@@ -74,6 +152,105 @@ Markdown 增加带日期的工程补充；PDF 保留之前已审阅的版式，�
 提取与宿主逐页复核、基于证据的来源日期、会议最终来源绑定和独立视觉服务配置。
 这些是兼容的摄入扩展与修复，不是新的论文实验或数据产物。Markdown 与 PDF 新增页
 使用同一补充内容，PDF 先前已审阅的页面予以保留。
+
+2026年9月23日的 `v0.7.0` 补充说明规范运行时功能注册表、持久状态与一次性功能的
+明确区分、原生演示文稿制作，以及以 Raw 证据为事实权威的模板驱动简历。公开版本
+包含匿名简历模板包，不包含个人记录或生成的实际简历版本；同时记录 PDF 提取、
+摄入恢复、图校验和工程影响分析的兼容性强化。本次更新不改变冻结论文产物，PDF
+保留此前已审阅页面，并附加同一工程更新内容。
+
+2026年9月26日的 `v0.8.0` 补充说明为已准备的摄入事务增加跨宿主 Agent 持久接力，
+加入物理隔离的 private 摄入与查询，分离原生演示文稿的结构提取与视觉识读，并增加
+可复用幻灯片组件、受管可编辑图稿和显式服务商 API 路径。上述内容是向后兼容的工作流
+与配置能力，因此按 MINOR 升版。公开树只包含通用隔离实现和合成测试，不包含私有知识；
+本次更新不改变冻结论文产物，PDF 保留此前已审阅页面，并附加同一工程更新内容。
+
+2026年9月26日的 `v0.9.0` 补充说明把公开发布固定为从显式、已提交源快照生成，
+新增发布 provenance、带回滚的事务性 clean 树安装、远端／分支／分叉检查、推送后
+commit 确认、GitHub 侧验证、PDF 逐页机械健康检查，以及中英文双语 Changelog 与
+版本判断。这是兼容新增的工程发布能力，不改变任何冻结论文产物，也不授权创建标签
+或 GitHub Release。
+
+2026年9月26日的 `v0.9.1` 补丁把公开发布回归中的未捕获 traceback 输出为机器可读的
+GitHub Actions 错误注解，以增强 CI 故障定位能力。该补丁不改变知识模型、摄入契约
+或冻结论文产物；Markdown 说明记录本次更新，PDF 保持为已审阅的 `v0.9.0` 版本。
+
+2026年9月26日的 `v0.9.2` 补丁在 GitHub Actions 固定校验环境中补充 NumPy 与 Pillow，
+使公开功能注册表的运行时导入检查可以在全新的 Python 3.12 runner 上执行。该补丁只
+修复 CI 依赖声明；PDF 保持为已审阅的 `v0.9.0` 版本。
+
+2026年9月26日的 `v0.9.3` 补丁在 GitHub Actions 固定校验环境中补充 python-pptx，
+供运行时功能注册表校验导入可编辑演示文稿工具。该补丁只修复 CI 依赖声明；PDF
+保持为已审阅的 `v0.9.0` 版本。
+
+2026年9月26日的 `v0.10.0` 更新建立独立 Community Downstream、受评估的
+ASKS-Compatible 身份和后续明确授予 Reference Distribution 的公开治理规则，并说明
+当前 GitHub 贡献须回灌受管源仓库后重新发布。Ran-ASKS 目前没有指定官方领域发行版，
+本次更新也不承诺插件 API 或 Extension Contract。Markdown 与 PDF 新增页包含同一
+治理说明，冻结论文产物保持不变。
+
+2026年10月3日的 `v0.11.0` 更新新增有界、只读的知识图可视化、受管幻灯片模板复用、
+扩展的演示文稿生产模式，以及更可靠的证据绑定会议摄入与维护恢复。Raw 仍是事实权威；
+可视化只用于导航，模板复用回执也不代表自动通过视觉审阅。Markdown 与 PDF 新增页
+包含同一更新，冻结论文产物保持不变。
+
+2026年10月4日的 `v0.12.0` 更新建立可复现的首次运行与验证基线：提供可安装的
+`ran-asks` 命令、已提交的 `uv` 锁文件、离线诊断、从 Graph 到 Wiki 再到来源原文的
+合成演示、分层测试、服务商配置示例，以及明确的提示注入和数据平面威胁边界。CI
+严格从锁文件安装。自本版本起，每个已发布的公开树版本获得不可变 annotated Git
+标签；创建 GitHub Release 仍需单独授权。Markdown 与 PDF 新增页包含同一更新，
+冻结论文产物保持不变。
+
+2026年10月7日的 `v0.13.0` 更新强化 Agent 模式论文摄入：使用单一版本化的书目／Wiki／
+语义工作区，为书目值绑定有界来源行证据，按章节自适应阅读论文，显式限制语义谓词角色，
+并让校验与提交接力始终绑定原事务。同时新增失败关闭的 inbox 分类证据检查和持久化的
+概念身份区分。这些能力向后兼容，不改变 Raw／Wiki／Graph 边界或任何冻结论文产物；
+Markdown 与追加的 PDF 页面包含同一更新。
+
+2026年10月10日的 `v0.14.0` 更新新增显式授权的公开 PDF PaddleOCR 官网解析回退、
+按证据范围记录的 Frontier 回答历史与刷新比较，以及 Hub 分裂后的只读维护对账。
+远程提取有恢复检查点和传输预算，private 输入不能使用新增后端；参考文献与普通
+预期不再直接作为未来研究候选。维护对账只闭合已满足的动作，不掩盖其他待审事项。
+Markdown 与追加的 PDF 页面包含同一更新；既有论文实验与冻结产物边界保持不变。
+
+2026年10月10日的 `v0.15.0` 更新新增 preview 智能口试状态：先共同准备并确认有
+知识库依据的范围，再通过明确指令开始、暂停、恢复和结束；独立私有记录保留完整
+对话。新方案默认采用讨论诊断式，允许学生提问、考官纠正和引导自纠，结束后区分
+独立理解与帮助后的学习变化。`/oral help` 提供独立使用帮助。API 外发逐次授权，
+真实模型与教师验收仍必要；会议角色和身份纠正也强化来源约束。这是向后兼容的
+新增能力，Markdown 与追加的 PDF 页面包含同一更新，冻结论文产物保持不变。
+
+The 2026-10-13 `v0.16.0` update adds preview evidence-bound scientific-code
+discovery, explicitly selected fixed-recipe local checks and calibrated offline
+raster digitization. The public scientific-code catalog is synthetic, excludes
+local Raw/run records, and does not claim paper reproduction. Ingestion retains
+independent Agent/API controllers while improving API input representation and
+source checks. Engineering decisions prioritize quality and efficiency, with
+plans for complex changes. Input-size reductions do not establish billed-cost
+or live-model quality gains. The Markdown and appended Word-exported PDF pages
+contain the same update; frozen paper experiments and artifacts are unchanged.
+
+2026年10月13日的 `v0.16.0` 更新新增 preview 科研代码发现、显式固定配方本地检查及
+经标定的离线图片数据提取。公开目录为合成示例，不含本地 Raw 或实际运行记录，也不
+宣称论文复现。摄入改进 API 输入表示与来源检查，保持两种后端控制循环独立；建设以
+质量与效率为准，复杂变更先计划。输入长度减少不代表实际费用或线上质量改善已经
+验证。Markdown 与 Word 导出的追加 PDF 页面同步，冻结论文实验与产物保持不变。
+
+The 2026-10-15 `v0.17.0` update adds preview public-science poster collaboration,
+motivation-first storytelling, visible-acronym validation, optional independent
+simulated-reader feedback and reusable illustration briefs using existing native
+and explicitly authorized raster engines. Both READMEs identify the macOS version
+and link the separately maintained Windows version without certifying it.
+The generic oral host playbook lives under public operations, not personal memory.
+These are compatible capabilities and documentation updates; frozen paper
+artifacts are unchanged. The Markdown and newly appended Word-exported,
+normalized PDF pages contain the same addendum; earlier reviewed pages remain.
+
+2026年10月15日的 `v0.17.0` 更新新增 preview 科普展板协作、从动机出发的公众叙事、
+可见缩写校验、可选独立模拟读者及复用既有绘图引擎的共享插图 brief。中英文 README
+明确 macOS 开发归属并加入独立维护的 Windows 版本入口，不据此认证兼容性。公开树
+只新增精确批准的通用口试快路径，不包含个人记忆。Markdown 与 Word 导出并标准化的
+追加 PDF 页面同步，保留原已审阅页面；论文实验和冻结数据产物保持不变。
 
 | 中文说明涉及的内容 | Ran-ASKS 边界 | 论文数据产物 | 状态 |
 | --- | --- | --- | --- |

@@ -9,8 +9,9 @@ REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / ".scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from visual_qa import run_visual_qa
+from visual_qa import DEFAULT_FALLBACK_MODEL, DEFAULT_MODEL, run_visual_qa
 from dsh.harness import ToolDefinition
+from dsh.function_catalog import bind_tools
 
 
 def _visual_check(arguments: dict) -> str:
@@ -31,7 +32,7 @@ def _visual_check(arguments: dict) -> str:
 
 def build_visual_tools() -> list[ToolDefinition]:
     """Return the isolated visual tool set (not part of query_actions)."""
-    return [
+    tools = [
         ToolDefinition(
             name="visual_check",
             description=(
@@ -81,11 +82,11 @@ def build_visual_tools() -> list[ToolDefinition]:
                     },
                     "model": {
                         "type": "string",
-                        "description": "主视觉模型，默认 GLM-4.6V",
+                        "description": f"主视觉模型，默认 {DEFAULT_MODEL}",
                     },
                     "fallback_model": {
                         "type": "string",
-                        "description": "回退视觉模型，默认 GLM-4.5V",
+                        "description": f"回退视觉模型，默认 {DEFAULT_FALLBACK_MODEL}",
                     },
                 },
                 "required": ["path"],
@@ -95,3 +96,4 @@ def build_visual_tools() -> list[ToolDefinition]:
             timeout_ms=None,
         )
     ]
+    return bind_tools(tools)

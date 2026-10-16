@@ -8,6 +8,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ingest_check
 
 
+def test_venue_key_preserves_non_ascii_venue_names():
+    assert ingest_check._venue_key("新型炭材料") == "新型炭材料"
+    assert ingest_check._venue_key("新型炭材料") != ingest_check._venue_key("炭材料学报")
+    assert ingest_check._venue_key("The Journal of Testing (2024)") == "journaloftesting"
+
+
 def test_graph_flag_is_not_treated_as_path():
     import subprocess
     result = subprocess.run(
@@ -15,6 +21,13 @@ def test_graph_flag_is_not_treated_as_path():
         capture_output=True, text=True,
     )
     assert "路径不存在,跳过: --graph" not in result.stderr
+
+
+def test_bare_abbreviation_check_ignores_mixed_case_word_interior():
+    warnings = ingest_check.check_bare_abbreviation({"核心方法": ["张量LoRA"]})
+    assert warnings == []
+    warnings = ingest_check.check_bare_abbreviation({"核心方法": ["MLP"]})
+    assert warnings
 
 
 def test_graph_checks_with_isolated_database():
@@ -257,6 +270,26 @@ def test_extract_engine_warns_on_non_mineru():
             ingest_check.REPO = old_repo
         assert not errors
         assert not any("mineru" in w for w in warnings), f"mineru should not warn, got {warnings}"
+        record = {
+            "source": "paddleocr_official_api", "model": "PaddleOCR-VL-1.6",
+            "task": "doc_parsing", "page_count": 1, "job_id": "job-1",
+            "upload_authorization": "public_pdf", "fallback_reason": "quota",
+            "input_sha256": "a" * 64, "request_sha256": "b" * 64,
+        }
+        for approved in (True, False):
+            if not approved:
+                record.pop("task")
+            import yaml
+            (raw_dir / "parse_meta.yaml").write_text(yaml.safe_dump({
+                "preferred": "paddleocr", "engines": {"paddleocr": record},
+            }), encoding="utf-8")
+            ingest_check.REPO = repo
+            try:
+                errors, warnings = ingest_check.check_file(page, set(), set())
+            finally:
+                ingest_check.REPO = old_repo
+            assert not errors
+            assert any("非 mineru" in warning for warning in warnings) == (not approved)
 
 
 def test_bibliographic_consistency_uses_published_year_and_aps_doi():
@@ -292,6 +325,42 @@ def test_bibliographic_consistency_uses_published_year_and_aps_doi():
             ingest_check.REPO = old_repo
     assert any("published year=2013" in error for error in errors)
     assert any("Phys. Rev. B 88, 035103" in error for error in errors)
+
+
+def test_bibliographic_consistency_accepts_exact_layout_venue_over_stale_scalar():
+    with tempfile.TemporaryDirectory() as directory:
+        repo = Path(directory).resolve()
+        raw_dir = repo / "academic/raw/references/demo"
+        raw_dir.mkdir(parents=True)
+        (raw_dir / "paper.md").write_text("# Demo\n", encoding="utf-8")
+        (raw_dir / "source.yaml").write_text(
+            "bibliographic:\n"
+            "  year: '2007'\n"
+            "  venue: Journal of Physics\n"
+            "  layout_candidates:\n"
+            "    venues:\n"
+            "    - value: Journal of Physics\n"
+            "      evidence: old-layout\n"
+            "  front_matter_blocks:\n"
+            "  - text: 'Journal of Physics: Condensed Matter'\n"
+            "    evidence: pdf_layout_front_matter.page1.block1\n",
+            encoding="utf-8",
+        )
+        page = repo / "academic/wiki/papers/demo.md"
+        page.parent.mkdir(parents=True)
+        fm = {
+            "type": "paper-summary",
+            "sources": ["academic/raw/references/demo/paper.md"],
+            "date": 2007,
+            "venue": "Journal of Physics: Condensed Matter",
+        }
+        old_repo = ingest_check.REPO
+        ingest_check.REPO = repo
+        try:
+            errors = ingest_check.check_bibliographic_consistency(page, fm)
+        finally:
+            ingest_check.REPO = old_repo
+    assert errors == []
 
 
 def test_coverage_anchors_prefer_locked_bibliographic_authors():
@@ -456,6 +525,7 @@ def test_locator_aware_page_runs_only_minimal_closed_loop_checks():
 
 
 def main():
+    test_venue_key_preserves_non_ascii_venue_names()
     test_academic_non_paper_types_validate_in_final_domain()
     test_graph_checks_with_isolated_database()
     test_graph_checks_rejects_cross_layer_metadata_without_requiring_locator()
@@ -538,6 +608,7 @@ y
 
     test_extract_engine_warns_on_non_mineru()
     test_bibliographic_consistency_uses_published_year_and_aps_doi()
+    test_bibliographic_consistency_accepts_exact_layout_venue_over_stale_scalar()
     test_coverage_anchors_prefer_locked_bibliographic_authors()
     test_coverage_anchors_expand_only_truncated_locked_surname_particle()
     test_locator_aware_page_runs_only_minimal_closed_loop_checks()

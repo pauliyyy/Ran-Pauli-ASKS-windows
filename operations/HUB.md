@@ -124,6 +124,7 @@ create、define-scope、split、merge 与 batch-create 的 apply 共享同一生
 
 - unassigned 候选簇 cohesion≥0.6 且 members≥4 时写入 `temp/hub-auto-create/<session>.json`，主 Agent 生成 title/Scope/parent 后调用 `hub_semantics auto-create --apply <file>`。
 - canonical Hub 的 `聚类于` 成员数超过上限、尚无子 Hub，且 `analyze_split` 通过成员数量、小簇稳定性和质心区分度闸时，写入 `temp/hub-auto-split/<session>.json`。主 Agent 为每簇生成 title/Scope、原样使用候选 members，随后调用 `hub_semantics split-apply --parent <hub> --plan <file> --agent-confirmed`。
+- 分裂成功后，以本批报告运行 `ingest_inbox.py --reconcile-maintenance-report <report>` 闭合维护 handoff；shared 对账只读直接子 Hub 的 canonical Scope、与父 Hub 关联的 split history 和候选成员的 family membership。原簇完整迁入不同子 Hub 且已移除父 membership 才消费该候选，保留其他分裂、方向复核、缩写等待审动作，并沿共享发布入口同步报告、回执和全部关联事务；不重新聚类或调用 embedding。
 - 已有子 Hub 的超限父 Hub 写入 `temp/hub-auto-redistribute/<session>.json`。handoff 列出 canonical Scope readiness、blockers 及受控命令；任一子 Hub 缺正式 Scope 时先用 `define-scope --agent-confirmed` 定义，随后才允许 `redistribute --agent-confirmed`。
 - 论文 canonical Scope 路由达到 floor 但 margin 不足时写入 `temp/hub-route-review/<session>.json`，只保留 canonical 候选和 `route-apply` 命令模板交主 Agent判断，不自动写方向边。
 - membership 先汇总并去重 profile、Scope 与 prototype 文本，再单次进入 embedding cache；provider 可按 batch 上限分块，但禁止逐节点串行请求 API。维护超过 120 秒返回可重试 `deferred`，不得改变文件摄入终态。
@@ -181,6 +182,8 @@ python3 .scripts/hub_semantics.py route-apply --page <paper> --hub <canonical-hu
 论文 Wiki 仍保留可 locate 的 `## 研究方向定位`。程序只比较该句与 active、具有正式 `## Scope` 的 canonical Hub；legacy title 只用于候选诊断。canonical top-1 同时达到 floor 与 margin 后，若它是子 Hub，还必须在论文 profile 中命中扣除父 Scope 后的子方向特异性词项；否则以 `child_specificity_unsupported` abstain。达到 floor 但 margin 不足时同样 abstain，二者都生成 route-review handoff。
 
 主 Agent 复核后，`route-apply` 仅接受当前候选榜中的 active canonical research-direction Hub，并替换该论文既有同谓词 Hub 路由边；新边同时记录 `研究方向定位` evidence、普通 origin 与 `agent-confirmed:<locator>` origin，重摄入清理时保留。传入 `--transaction-id` 时，原事务同时写入 `route_corrections`、当前路由快照和派生 `quality_status`，并消费匹配的 route-review handoff、同步 maintenance 回执与摄入报告；没有其他待审动作时 maintenance 转为 `completed`。后续 route 查询返回 `agent_confirmed_override`，但仍保留自动门禁结果供审计。它不降低自动 floor/margin。
+
+`page → 主要研究 → Hub` 是 graph schema 的受保护边。自动 route 只有同时通过 canonical floor、margin 和子方向特异性门后，才由 `graph_ingest` 写入并记录 `automatic-route:<locator>` authorization origin；Agent 复核路径只由 `route-apply` 写入 `agent-confirmed:<locator>`。普通 semantic IR、兼容 triples 和外部包装器不得创建该边。存量缺 authorization origin 由 `graph_validate` 聚合为迁移 WARN；新写入失败关闭。embedding 不可用或没有 canonical candidates 时保持未归类，不创建 manual route，也不把论文摄入降为失败。
 
 摄入报告发布时即关联各已完成事务的共享维护回执。方向裁决同时更新报告对应文件的当前路由与质量摘要，避免后续维护使用旧路由重复生成待审项；其他图导航歧义不会因方向已确认而消失。缺失关联的历史回执按 `INBOX.md` 的 `--reconcile-maintenance-report` 定向修复。
 

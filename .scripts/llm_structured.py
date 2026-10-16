@@ -8,7 +8,7 @@ API 调用按 fast/standard/deep/xdeep 档位控制 provider 推理强度；输�
 """
 from __future__ import annotations
 import json
-import os
+import math
 import re
 import time
 import hashlib
@@ -18,6 +18,7 @@ import uuid
 from pathlib import Path
 
 import agent_task
+import env_config
 import recovery_policy as rp
 
 REPO = Path(__file__).resolve().parent.parent
@@ -206,34 +207,50 @@ def reasoning_decision(config: dict[str, str], operation: str,
 
 def expand_env_references(values: dict[str, str]) -> dict[str, str]:
     """展开同一配置中的 `${NAME}`，避免复制 endpoint/key。"""
-    pattern = re.compile(r"\$\{([A-Z0-9_]+)\}")
-    expanded = dict(values)
-    for _ in range(len(values) + 1):
-        updated = {key: pattern.sub(lambda match: expanded.get(match.group(1), match.group(0)), value)
-                   for key, value in expanded.items()}
-        if updated == expanded:
-            return updated
-        expanded = updated
-    return expanded
+    return env_config.expand_references(values)
 
 def load_env() -> dict[str, str]:
-    values = {}
-    env_file = REPO / ".env"
-    if env_file.exists():
-        for line in env_file.read_text(encoding="utf-8").splitlines():
-            if "=" in line and not line.lstrip().startswith("#"):
-                key, value = line.split("=", 1)
-                values[key.strip()] = value.strip()
     known = {
-        "QUERY_BACKEND", "INGEST_BACKEND", "LLM_API_BASE", "LLM_API_KEY", "LLM_MODEL",
+        "QUERY_BACKEND", "INGEST_BACKEND", "ORAL_EXAM_BACKEND", "LLM_API_BASE", "LLM_API_PATH",
+        "LLM_API_KEY", "LLM_MODEL",
         "INGEST_KEYWORD_API_BASE", "INGEST_KEYWORD_API_KEY", "INGEST_KEYWORD_MODEL",
         "INGEST_REPAIR_API_BASE", "INGEST_REPAIR_API_KEY", "INGEST_REPAIR_MODEL",
-        "INGEST_GENERATION_API_BASE", "INGEST_GENERATION_API_KEY", "INGEST_GENERATION_MODEL",
-        "INGEST_PROPOSITION_API_BASE", "INGEST_PROPOSITION_API_KEY", "INGEST_PROPOSITION_MODEL",
+        "INGEST_GENERATION_API_BASE", "INGEST_GENERATION_API_PATH",
+        "INGEST_GENERATION_API_KEY", "INGEST_GENERATION_MODEL",
+        "INGEST_PROPOSITION_API_BASE", "INGEST_PROPOSITION_API_PATH",
+        "INGEST_PROPOSITION_API_KEY", "INGEST_PROPOSITION_MODEL",
         "SEMANTIC_RECOVERY_API_BASE", "SEMANTIC_RECOVERY_API_KEY", "SEMANTIC_RECOVERY_MODEL",
+        "LLM_REQUEST_TIMEOUT_SEC",
     }
-    values.update({key: value for key, value in os.environ.items() if key in known or key.startswith("LLM_REASONING_")})
-    return expand_env_references(values)
+    return env_config.load_env(
+        REPO / ".env", keys=known, prefixes=("LLM_REASONING_",)
+    )
+
+
+def request_timeout_seconds(config: dict[str, str], requested: float | None,
+                            fallback: float) -> float:
+    """Resolve a bounded transport timeout without changing retry budgets."""
+    if requested is not None:
+        value = float(requested)
+        if not math.isfinite(value) or value <= 0 or value > 600:
+            raise RuntimeError("timeout_sec 必须在 0 到 600 秒之间")
+        return value
+    raw = config.get("LLM_REQUEST_TIMEOUT_SEC", "").strip()
+    if not raw:
+        return fallback
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError("LLM_REQUEST_TIMEOUT_SEC 必须是数字") from exc
+    if not math.isfinite(value) or value < 30 or value > 300:
+        raise RuntimeError("LLM_REQUEST_TIMEOUT_SEC 必须在 30 到 300 秒之间")
+    return value
+
+
+def _chat_endpoint(config: dict[str, str], base: str, path: str = "") -> str:
+    return env_config.join_api_url(
+        base, path or config.get("LLM_API_PATH", "") or "/v1/chat/completions"
+    )
 
 
 def reasoning_profile(config: dict[str, str], operation: str, requested: str | None = None,
@@ -264,9 +281,11 @@ def configured_model(config: dict[str, str] | None = None) -> str:
 
 def api_profiles(config: dict[str, str], operation: str) -> list[dict[str, str]]:
     """返回 API 调用顺序；专用配置不完整时安全地忽略。"""
+    primary_base = config.get("LLM_API_BASE", "")
     primary = {
         "name": "primary",
-        "base": config.get("LLM_API_BASE", ""),
+        "base": primary_base,
+        "endpoint": _chat_endpoint(config, primary_base) if primary_base else "",
         "key": config.get("LLM_API_KEY", ""),
         "model": config.get("LLM_MODEL", ""),
     }
@@ -282,26 +301,30 @@ def api_profiles(config: dict[str, str], operation: str) -> list[dict[str, str]]
         prefixes = ["INGEST_GENERATION"]
     elif operation == "ingest_proposition":
         # 优先独立命题模型；未配置时复用已验证的 generation specialist，
-        # 最后才回退主模型。重复 model 只保留一次。
+        # 最后才回退主模型。重复 endpoint + model 只保留一次。
         prefixes = ["INGEST_PROPOSITION", "INGEST_GENERATION"]
     elif operation == "ingest_semantic_recovery":
         prefixes = ["SEMANTIC_RECOVERY"]
     if not prefixes:
         return [primary]
     profiles = []
-    seen_models = set()
+    seen_profiles = {(primary["endpoint"], primary["model"])}
     for prefix in prefixes:
+        specialist_base = config.get(f"{prefix}_API_BASE", "")
         specialist = {
             "name": prefix.lower(),
-            "base": config.get(f"{prefix}_API_BASE", ""),
+            "base": specialist_base,
+            "endpoint": _chat_endpoint(
+                config, specialist_base, config.get(f"{prefix}_API_PATH", "")
+            ) if specialist_base else "",
             "key": config.get(f"{prefix}_API_KEY", ""),
             "model": config.get(f"{prefix}_MODEL", ""),
         }
-        if all(specialist[key] for key in ("base", "key", "model")) \
-                and specialist["model"] != primary["model"] \
-                and specialist["model"] not in seen_models:
+        identity = (specialist["endpoint"], specialist["model"])
+        if all(specialist[key] for key in ("endpoint", "key", "model")) \
+                and identity not in seen_profiles:
             profiles.append(specialist)
-            seen_models.add(specialist["model"])
+            seen_profiles.add(identity)
     profiles.append(primary)
     return profiles
 
@@ -357,7 +380,21 @@ def _classify_http_error(exc: Exception) -> tuple[bool, str]:
     if isinstance(exc, urllib.error.HTTPError):
         code = exc.code
         retryable = code in (408, 425, 429) or 500 <= code < 600
-        return retryable, f"HTTP {code} {exc.reason}"
+        label = f"HTTP {code} {exc.reason}"
+        try:
+            payload = json.loads(exc.read(65536).decode("utf-8", errors="replace"))
+            provider_error = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(provider_error, dict):
+                detail = str(provider_error.get("message") or provider_error.get("code") or "").strip()
+            else:
+                detail = str(provider_error or "").strip()
+            detail = re.sub(r"(?i)(?:bearer|api[_ -]?key)\s*[:=]?\s*\S+", "[credential redacted]", detail)
+            detail = " ".join(detail.split())[:400]
+            if detail:
+                label = f"{label}: {detail}"
+        except (AttributeError, OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+        return retryable, label
     if isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError)):
         return True, type(exc).__name__ + ": " + str(exc)
     return False, type(exc).__name__ + ": " + str(exc)
@@ -400,10 +437,14 @@ def _retry_available(category: str, used: dict[str, int], limits: dict[str, int]
     return attempt < legacy_retries
 
 
-def call_json(prompt: str, schema_check, *, system: str = "你是受程序约束的知识库组件，只输出要求的 JSON。", max_tokens: int = 800, retries: int = 1, recovery_limits: dict | None = None, operation: str = "query", reasoning: str | None = None, reasoning_context: dict | None = None, messages: list[dict] | None = None, transaction_id: str = "", timeout_sec: float = 90) -> dict:
+def call_json(prompt: str, schema_check, *, system: str = "你是受程序约束的知识库组件，只输出要求的 JSON。", max_tokens: int = 800, retries: int = 1, recovery_limits: dict | None = None, operation: str = "query", reasoning: str | None = None, reasoning_context: dict | None = None, messages: list[dict] | None = None, transaction_id: str = "", timeout_sec: float | None = None) -> dict:
     config = load_env()
+    timeout_sec = request_timeout_seconds(config, timeout_sec, 90)
     is_ingest = operation == "ingest" or operation.startswith("ingest_")
-    mode = ingest_mode(config) if is_ingest else execution_mode(config)
+    if operation == "oral_exam":
+        mode = config.get("ORAL_EXAM_BACKEND", "agent").strip().lower() or "agent"
+    else:
+        mode = ingest_mode(config) if is_ingest else execution_mode(config)
     if mode != "api":
         raise RuntimeError(
             "llm_structured 仅支持 API backend；当前宿主 Agent 必须使用 agent-task-v1"
@@ -422,7 +463,7 @@ def call_json(prompt: str, schema_check, *, system: str = "你是受程序约束
     reasoning_options = reasoning_request_options(config, profile_name)
     recovery_reasoning_options = reasoning_request_options(config, "fast")
     profiles = api_profiles(config, operation)
-    if not all(profiles[0][key] for key in ("base", "key", "model")):
+    if not all(profiles[0][key] for key in ("endpoint", "key", "model")):
         variable = "INGEST_BACKEND" if is_ingest else "QUERY_BACKEND"
         _cfg_err = {"ok": False, "status": "configuration_error", "mode": "api", "error": f"{variable}=api 时必须配置 LLM_API_BASE、LLM_API_KEY、LLM_MODEL", "event_kind": "configuration", "call_id": call_id, "recovery_policy_version": rp.POLICY_VERSION, "recovery_class": "configuration", "retryable": False}
         _log_event(operation, _cfg_err, audit_prompt, transaction_id=transaction_id)
@@ -452,7 +493,7 @@ def call_json(prompt: str, schema_check, *, system: str = "你是受程序约束
             }
             payload_data.update(attempt_reasoning)
             payload = json.dumps(payload_data).encode()
-            request = urllib.request.Request(profile["base"].rstrip("/") + "/v1/chat/completions", data=payload, headers={"Authorization": "Bearer " + profile["key"], "Content-Type": "application/json"})
+            request = urllib.request.Request(profile["endpoint"], data=payload, headers={"Authorization": "Bearer " + profile["key"], "Content-Type": "application/json"})
             started = time.time()
             fast_fail = False
             try:
@@ -531,7 +572,7 @@ def call_json(prompt: str, schema_check, *, system: str = "你是受程序约束
     return _final
 
 
-def call_text(prompt: str, *, system: str = "你是受程序约束的知识库组件，只输出要求的文本。", max_tokens: int = 1600, retries: int = 1, recovery_limits: dict | None = None, operation: str = "query", reasoning: str | None = None, reasoning_context: dict | None = None, messages: list[dict] | None = None, transaction_id: str = "") -> dict:
+def call_text(prompt: str, *, system: str = "你是受程序约束的知识库组件，只输出要求的文本。", max_tokens: int = 1600, retries: int = 1, recovery_limits: dict | None = None, operation: str = "query", reasoning: str | None = None, reasoning_context: dict | None = None, messages: list[dict] | None = None, transaction_id: str = "", timeout_sec: float | None = None) -> dict:
     """受限 LLM 文本调用：返回原始文本，不做 JSON 解析或 schema 校验。
 
     用于需要长文本输出的场景（如 wiki 页面撰写 + 语义槽），镜像 call_json 的 API 调用与重试逻辑，
@@ -541,6 +582,7 @@ def call_text(prompt: str, *, system: str = "你是受程序约束的知识库�
     用它代替 system+prompt 拼装，prompt 参数仅用于重试时的提示文本。
     """
     config = load_env()
+    timeout_sec = request_timeout_seconds(config, timeout_sec, 180)
     is_ingest = operation == "ingest" or operation.startswith("ingest_")
     mode = ingest_mode(config) if is_ingest else execution_mode(config)
     if mode != "api":
@@ -561,7 +603,7 @@ def call_text(prompt: str, *, system: str = "你是受程序约束的知识库�
     reasoning_options = reasoning_request_options(config, profile_name)
     recovery_reasoning_options = reasoning_request_options(config, "fast")
     profiles = api_profiles(config, operation)
-    if not all(profiles[0][key] for key in ("base", "key", "model")):
+    if not all(profiles[0][key] for key in ("endpoint", "key", "model")):
         variable = "INGEST_BACKEND" if is_ingest else "QUERY_BACKEND"
         _cfg_err = {"ok": False, "status": "configuration_error", "mode": "api", "error": f"{variable}=api 时必须配置 LLM_API_BASE、LLM_API_KEY、LLM_MODEL", "event_kind": "configuration", "call_id": call_id, "recovery_policy_version": rp.POLICY_VERSION, "recovery_class": "configuration", "retryable": False}
         _log_event(operation, _cfg_err, audit_prompt, transaction_id=transaction_id)
@@ -594,11 +636,11 @@ def call_text(prompt: str, *, system: str = "你是受程序约束的知识库�
             }
             payload_data.update(attempt_reasoning)
             payload = json.dumps(payload_data).encode()
-            request = urllib.request.Request(profile["base"].rstrip("/") + "/v1/chat/completions", data=payload, headers={"Authorization": "Bearer " + profile["key"], "Content-Type": "application/json"})
+            request = urllib.request.Request(profile["endpoint"], data=payload, headers={"Authorization": "Bearer " + profile["key"], "Content-Type": "application/json"})
             started = time.time()
             fast_fail = False
             try:
-                with urllib.request.urlopen(request, timeout=180) as response:
+                with urllib.request.urlopen(request, timeout=timeout_sec) as response:
                     data = json.loads(response.read())
                 choice = (data.get("choices") or [{}])[0]
                 text = (choice.get("message") or {}).get("content") or ""

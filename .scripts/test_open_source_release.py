@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 """Regression checks for manifest-governed public release construction."""
+import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 from unittest.mock import patch
 
+import fitz
 import open_source_release as release
 
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / ".scripts/open_source_release.py"
+PUBLIC_RESEARCH_TEMPLATE_FILES = {'projects/_templates/research/schema.yaml', 'projects/_templates/research/codes/README.md', 'projects/_templates/research/AGENTS.md', 'projects/_templates/research/codes/analysis/README.md', 'projects/_templates/research/notes/status.md', 'projects/_templates/research/outputs/.gitkeep', 'projects/_templates/research/README.md', 'projects/_templates/research/codes/tests/README.md', 'projects/_templates/research/codes/docs/PHYSICS.md', 'projects/_templates/research/codes/docs/README.md', 'projects/_templates/research/codes/experiments/README.md'}
 
 
 def run(*args: str, expected: int = 0) -> subprocess.CompletedProcess:
@@ -36,18 +42,29 @@ def check_version_preparation() -> None:
         version_path = repository / "VERSION"
         changelog = repository / "public-CHANGELOG.md"
         mirror = repository / "CHANGELOG.md"
-        original = "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Image OCR.\n\n## [0.4.0] - 2026-09-04\n\n- Earlier work.\n"
+        original = (
+            "# Changelog\n\n## [Unreleased]\n\n### Highlights\n\n- Image OCR.\n\n"
+            "### 主要更新\n\n- 新增图片文字识别。\n\n"
+            "## [0.4.0] - 2026-09-04\n\n- Earlier work.\n"
+        )
         version_path.write_text("0.4.0\n", encoding="utf-8")
         changelog.write_text(original, encoding="utf-8")
         mirror.write_text("old mirror\n", encoding="utf-8")
         manifest = {"public_assets": {"CHANGELOG.md": changelog.name}}
         with patch.object(release, "REPO", repository), patch.object(release, "VERSION_PATH", version_path), patch.object(release, "load_manifest", return_value=manifest):
-            arguments = {"level": "minor", "reason": "Compatible image ingestion capability", "from_version": "0.4.0", "release_date": "2026-09-08"}
+            arguments = {
+                "level": "minor", "reason": "Compatible image ingestion capability",
+                "reason_zh": "新增向后兼容的图片摄入能力", "from_version": "0.4.0",
+                "release_date": "2026-09-08",
+            }
             snapshot = {item: item.read_bytes() for item in (version_path, changelog, mirror)}
             planned = release.prepare_version(**arguments)
             assert planned["status"] == "planned" and planned["to"] == "0.5.0"
             assert all(item.read_bytes() == content for item, content in snapshot.items())
-            for changes in [{"reason": " "}, {"reason": "two\nlines"}, {"release_date": "invalid"}]:
+            for changes in [
+                {"reason": " "}, {"reason": "two\nlines"}, {"reason_zh": " "},
+                {"reason_zh": "English only"}, {"release_date": "invalid"},
+            ]:
                 try:
                     release.prepare_version(**(arguments | changes), apply=True)
                 except ValueError:
@@ -55,7 +72,12 @@ def check_version_preparation() -> None:
                 else:
                     raise AssertionError(changes)
                 assert all(item.read_bytes() == content for item, content in snapshot.items())
-            for invalid in ["# Changelog\n", "## [Unreleased]\n\n### Added\n", original + "\n## [0.5.0]\n"]:
+            for invalid in [
+                "# Changelog\n",
+                "## [Unreleased]\n\n### Highlights\n\n- English only.\n",
+                "## [Unreleased]\n\n### 主要更新\n\n- 只有中文。\n",
+                original + "\n## [0.5.0]\n",
+            ]:
                 changelog.write_text(invalid, encoding="utf-8")
                 try:
                     release.prepare_version(**arguments, apply=True)
@@ -88,7 +110,10 @@ def check_version_preparation() -> None:
             updated = changelog.read_text()
             assert "## [Unreleased]\n\n## [0.5.0] - 2026-09-08" in updated
             assert "- MINOR: Compatible image ingestion capability" in updated
+            assert "- MINOR（中文）：新增向后兼容的图片摄入能力" in updated
             assert "- Image OCR." in updated and "- Earlier work." in updated
+            assert "[Unreleased]: https://github.com/ranshiju/Ran-ASKS/compare/v0.5.0...HEAD" in updated
+            assert "[0.5.0]: https://github.com/ranshiju/Ran-ASKS/releases/tag/v0.5.0" in updated
             try:
                 release.prepare_version(**arguments, apply=True)
             except ValueError as error:
@@ -160,23 +185,200 @@ def check_documentation_omissions() -> None:
         assert not release.documentation_omission_errors(destination, manifest, {skill_path})
 
 
+def check_private_release_boundary() -> None:
+    # Synthetic inputs only: never copy real private content into test releases.
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary).resolve() / 'source'
+        root.mkdir()
+        (root / 'private').mkdir()
+        (root / 'private/synthetic.md').write_text('SYNTHETIC PRIVATE')
+        (root / 'assets').mkdir()
+        (root / 'assets/public.md').write_text('SYNTHETIC PUBLIC')
+        (root / 'assets/link.md').symlink_to(root / 'private/synthetic.md')
+        (root / 'linked').symlink_to(root / 'private', target_is_directory=True)
+        destination = root.parent / 'release'
+        destination.mkdir()
+        sentinel = destination / 'keep.txt'
+        sentinel.write_text('unchanged')
+        base = {'include': [], 'exclude': [], 'public_assets': {}, 'template_dirs': []}
+        invalid = [
+            {'include': ['private/**']},
+            {'include': ['**']},
+            {'include': ['linked/**']},
+            {'public_assets': {'docs/renamed.md': 'private/synthetic.md'}},
+            {'public_assets': {'private/renamed.md': 'assets/public.md'}},
+            {'public_assets': {'docs/renamed.md': 'assets/link.md'}},
+            {'public_assets': {'docs/renamed.md': 'linked/synthetic.md'}},
+            {'public_assets': {'../escape.md': 'assets/public.md'}},
+            {'public_assets': {'/absolute.md': 'assets/public.md'}},
+            {'public_assets': {'docs/renamed.md': '../outside.md'}},
+            {'template_dirs': ['Private/wiki']},
+            {'template_dirs': ['../escape']},
+        ]
+        with patch.object(release, 'REPO', root):
+            assert release.release_preflight(base | {'include': ['assets/public.md']}) == {'assets/public.md'}
+            for changes in invalid:
+                with patch.object(release, 'load_manifest', return_value=base | changes):
+                    try:
+                        release.build(destination, clean=True, force=True)
+                    except ValueError:
+                        pass
+                    else:
+                        raise AssertionError(f'private boundary accepted: {changes}')
+                assert sentinel.read_text() == 'unchanged', 'preflight must precede cleanup'
+                assert sorted(p.name for p in destination.iterdir()) == ['keep.txt']
+
+
+
+def check_public_research_template_boundary() -> None:
+    """Only the eleven declared generic files may enter a public source snapshot."""
+    manifest = release.load_manifest()
+    patterns = [path for path in manifest["include"] if path.startswith("projects/")]
+    assert set(patterns) == PUBLIC_RESEARCH_TEMPLATE_FILES
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary) / "source"
+        destination = Path(temporary) / "release"
+        root.mkdir(); destination.mkdir()
+        for relative in PUBLIC_RESEARCH_TEMPLATE_FILES:
+            target = root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(REPO / relative, target)
+        sentinels = [
+            "projects/teacher-instance/notes/status.md",
+            "projects/_templates/research/.env",
+            "projects/_templates/research/.workspace/items/runtime.md",
+            "projects/_templates/research/outputs/generated.json",
+            "projects/_templates/research/notes/extra-personal.md",
+            "private/synthetic.md", "academic/raw/source/paper.md", ".env",
+        ]
+        for relative in sentinels:
+            target = root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("SYNTHETIC NONPUBLIC TEST INPUT", encoding="utf-8")
+        with patch.object(release, "REPO", root):
+            selected = release.selected_files({"include": patterns, "exclude": []})
+        assert selected == PUBLIC_RESEARCH_TEMPLATE_FILES
+        assert not selected.intersection(sentinels)
+        # Even existing/optional private project nodes stay outside the projected graph.
+        import yaml
+        graph = root / release.PUBLIC_GRAPH_PATH
+        graph.parent.mkdir(parents=True, exist_ok=True)
+        nodes = {
+            "generic_template": {"path": "projects/_templates/research/schema.yaml", "kind": "template"},
+            "active_project": {"path": "projects/teacher-instance/notes/status.md", "optional": True},
+            "lookalike_template": {"path": "projects/_templates/research-other/schema.yaml", "optional": True},
+            "private_metadata": {"path": ".project/META.md", "optional": True},
+        }
+        graph.write_text(yaml.safe_dump({"nodes": nodes, "edges": []}), encoding="utf-8")
+        template = destination / "projects/_templates/research/schema.yaml"
+        template.parent.mkdir(parents=True)
+        template.write_text("generic: true\n", encoding="utf-8")
+        with patch.object(release, "REPO", root):
+            projected = release.projected_engineering_graph(destination)
+        assert set(projected["nodes"]) == {"generic_template"}
+
+
+def check_pdf_render_health() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        valid = root / "valid.pdf"
+        document = fitz.open()
+        page = document.new_page()
+        page.insert_text((72, 72), "Valid release page")
+        document.save(valid)
+        document.close()
+        assert release.pdf_render_health(valid)["page_count"] == 1
+
+        missing = root / "missing.pdf"
+        document = fitz.open()
+        page = document.new_page()
+        page.insert_text((72, 72), "missing □", fontname="china-s")
+        document.save(missing)
+        document.close()
+        try:
+            release.pdf_render_health(missing)
+        except ValueError as error:
+            assert "missing-glyph" in str(error)
+        else:
+            raise AssertionError("missing-glyph PDF accepted")
+
+        blank = root / "blank.pdf"
+        document = fitz.open(); document.new_page(); document.save(blank); document.close()
+        try:
+            release.pdf_render_health(blank)
+        except ValueError as error:
+            assert "renders blank" in str(error)
+        else:
+            raise AssertionError("blank PDF accepted")
+
+
 def main() -> None:
+    check_private_release_boundary()
+    check_public_research_template_boundary()
     check_documentation_omissions()
     check_version_preparation()
     check_version_progression()
+    check_pdf_render_health()
     expected_version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
     with tempfile.TemporaryDirectory() as temporary:
         destination = Path(temporary) / "release"
         run("build", str(destination))
+        catalog_path = destination / "computing/code-library/graph.yaml"
+        assert catalog_path.is_file(), "public scientific-code catalog must be an approved synthetic asset"
+        assert catalog_path.read_bytes() == (
+            REPO / "operations/engineering/open-source-assets/computing/code-library/graph.yaml"
+        ).read_bytes()
+        import yaml
+        catalog = yaml.safe_load(catalog_path.read_text(encoding="utf-8"))
+        assert all(record["kind"] not in {"raw", "run"} for record in catalog["evidence"].values())
+        assert all(record["path"].startswith("computing/code-library/") for record in catalog["evidence"].values())
+        checked = subprocess.run(
+            [sys.executable, ".scripts/code_library.py", "validate"],
+            cwd=destination, text=True, capture_output=True, check=True,
+        )
+        assert json.loads(checked.stdout)["ok"]
+        assert (destination / "computing/code-library/src/tensor_train.py").is_file()
+        assert (destination / "computing/code-library/tests/test_tensor_train.py").is_file()
         subprocess.run(["git", "init", "-q"], cwd=destination, check=True)
         verified = run("verify", str(destination))
         assert "Public release verified" in verified.stdout
+        (destination / "private").mkdir()
+        blocked = run("verify", str(destination), expected=1)
+        assert "private content path" in blocked.stderr
+        (destination / "private").rmdir()
         skill = destination / ".codex/skills/manuscript-diagnosis"
         assert {p.relative_to(skill).as_posix() for p in skill.rglob("*") if p.is_file()} == {
             "SKILL.md", "agents/openai.yaml", "scripts/diagnosis_preflight.py",
             "scripts/test_diagnosis_preflight.py",
         }
-        assert not (destination / "projects").exists()
+        published_projects = {
+            path.relative_to(destination).as_posix()
+            for path in (destination / "projects").rglob("*") if path.is_file()
+        }
+        assert published_projects == PUBLIC_RESEARCH_TEMPLATE_FILES
+        assert (destination / ".scripts/fixtures/public-playbook-index.md").is_file()
+        tracked_template = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "--", "projects/_templates/research"],
+            cwd=destination, text=True, capture_output=True, check=True,
+        )
+        assert set(tracked_template.stdout.splitlines()) == PUBLIC_RESEARCH_TEMPLATE_FILES
+        # Test the generated distribution's original CLI against a disposable project root.
+        with tempfile.TemporaryDirectory() as project_directory:
+            project_root = Path(project_directory)
+            shutil.copytree(destination / "projects/_templates/research",
+                            project_root / "_templates/research")
+            environment = os.environ.copy()
+            environment["WIKIGRAPH_PROJECTS_DIR"] = str(project_root)
+            for command in [
+                ["init", "export-smoke", "--name", "Synthetic export smoke", "--topic", "Portable template"],
+                ["validate", "export-smoke", "--strict"],
+            ]:
+                initialized = subprocess.run(
+                    [sys.executable, ".scripts/research_project.py", *command],
+                    cwd=destination, env=environment, text=True, capture_output=True,
+                )
+                assert initialized.returncode == 0, initialized.stdout + initialized.stderr
+            assert (project_root / "export-smoke/workspace.yaml").is_file()
         private_ignored = subprocess.run(
             ["git", "check-ignore", "projects/local-input/manuscript.pdf"],
             cwd=destination, text=True, capture_output=True,
@@ -196,6 +398,16 @@ def main() -> None:
         assert (destination / "README.md").is_file()
         assert (destination / "README.zh-CN.md").is_file()
         assert (destination / "CHANGELOG.md").is_file()
+        governance = (destination / "GOVERNANCE.md").read_text(encoding="utf-8")
+        ecosystem = (destination / "ECOSYSTEM.md").read_text(encoding="utf-8")
+        downstream_template = (
+            destination / "templates/downstream/DOWNSTREAM.md"
+        ).read_text(encoding="utf-8")
+        assert "generated public release tree" in governance
+        assert "contribution proposal" in governance
+        normalized_ecosystem = " ".join(ecosystem.split())
+        assert "Ran-ASKS currently lists none." in normalized_ecosystem
+        assert "not an extension manifest" in downstream_template
         changelog = (destination / "CHANGELOG.md").read_text(encoding="utf-8")
         assert f"## [{expected_version}]" in changelog
         assert "[CHANGELOG.md](CHANGELOG.md)" in (
@@ -258,8 +470,8 @@ def main() -> None:
         assert (destination / "THIRD_PARTY_NOTICES.md").is_file()
         assert (destination / "VERSION").is_file()
         assert (destination / "VERSION").read_text(encoding="utf-8").strip() == expected_version
-        assert f"> Current release: v{expected_version}" in (destination / "README.md").read_text(encoding="utf-8")
-        assert f"> 当前发布版本: v{expected_version}" in (
+        assert f"> Current main version: v{expected_version}" in (destination / "README.md").read_text(encoding="utf-8")
+        assert f"> 当前 main 版本: v{expected_version}" in (
             destination / "README.zh-CN.md"
         ).read_text(encoding="utf-8")
         assert "[简体中文](README.zh-CN.md)" in (
@@ -272,6 +484,42 @@ def main() -> None:
             destination / "README.md"
         ).read_text(encoding="utf-8")
         assert (destination / ".scripts/route.py").is_file()
+        for registry_path in (
+            ".scripts/function_registry.py",
+            ".scripts/test_function_registry.py",
+            "dsh/function_catalog.py",
+            "operations/config/function-registry.yaml",
+            "operations/engineering/adr/007-runtime-function-registry.md",
+        ):
+            assert (destination / registry_path).is_file(), registry_path
+        registry_check = subprocess.run(
+            [sys.executable, "-B", ".scripts/function_registry.py", "validate", "--runtime"],
+            cwd=destination, text=True, capture_output=True,
+        )
+        assert registry_check.returncode == 0, registry_check.stdout + registry_check.stderr
+        for presentation_path in (
+            ".scripts/presentation_runtime.py", ".scripts/test_presentation_runtime.py",
+            ".scripts/presentation_state.py", ".scripts/presentation_render.py",
+            ".scripts/test_presentation_state.py", ".scripts/presentation_delivery.py",
+            ".scripts/test_presentation_delivery.py",
+            "operations/PRESENTATION.md", "operations/engineering/presentation-test-plan.md",
+        ):
+            assert (destination / presentation_path).is_file(), presentation_path
+        presentation_route = subprocess.run(
+            [sys.executable, "-B", ".scripts/route.py", "--capability", "presentation",
+             "--capability-profile", "create"],
+            cwd=destination, text=True, capture_output=True,
+        )
+        assert presentation_route.returncode == 0, presentation_route.stderr
+        assert "当前阶段：1B" in presentation_route.stdout
+        for profile, label in (("form-check", "PPT形式检查"), ("evidence-check", "PPT证据核查"),
+                               ("citation-redact", "PPT引用脱敏")):
+            optional_route = subprocess.run(
+                [sys.executable, "-B", ".scripts/route.py", "--capability", "presentation",
+                 "--capability-profile", profile], cwd=destination, text=True, capture_output=True)
+            assert optional_route.returncode == 0, optional_route.stderr
+            assert label in optional_route.stdout
+        assert not (destination / "temp/presentation-runtime").exists()
         assert not (destination / ".scripts/e1_experiment.py").exists()
         assert not (destination / ".scripts/e1_order_robustness.py").exists()
         assert not (destination / ".scripts/test_e1_experiment.py").exists()
@@ -313,12 +561,28 @@ def main() -> None:
         }
         assert (destination / "academic/raw/.gitkeep").is_file()
         assert (destination / "academic/frontier/.gitkeep").is_file()
+        assert (destination / "operations/ORAL_EXAM_AGENT.md").is_file()
+        assert not (destination / "memory/playbooks/oral.md").exists()
+        assert not (destination / "memory/playbooks/index.md").exists()
+        oral_route = subprocess.run(
+            [sys.executable, ".scripts/route.py", "--task", "oral_exam"],
+            cwd=destination, text=True, capture_output=True, check=True,
+        )
+        assert "智能口试快路径" in oral_route.stdout
         assert not (destination / "academic/raw/example.pdf").exists()
         assert not any(destination.rglob(".DS_Store"))
         assert not (destination / ".scripts/speech_entity_index.json").exists()
         assert (destination / "operations/engineering/open-source-assets/README.md").is_file()
         graph_text = (destination / "operations/engineering/graph.yaml").read_text(encoding="utf-8")
         assert "frontier_store:" in graph_text
+        assert "presentation_delivery:" in graph_text
+        assert "presentation_delivery_test:" in graph_text
+        assert "presentation_state:" in graph_text
+        assert "presentation_render:" in graph_text
+        assert "presentation_state_test:" in graph_text
+        assert "presentation_runtime:" in graph_text
+        assert "presentation_ops:" in graph_text
+        assert "presentation_test_plan:" in graph_text
         assert "manuscript_diagnosis_skill:" in graph_text
         assert "manuscript_diagnosis_preflight:" in graph_text
         assert "manuscript_diagnosis_style:" not in graph_text
@@ -327,6 +591,8 @@ def main() -> None:
         assert "e1_experiment_workspace:" not in graph_text
         assert "e1_experiment_plan:" not in graph_text
         assert "e1_analysis:" not in graph_text
+        assert "research_project_template:" in graph_text
+        assert "path: projects/_templates/research/schema.yaml" in graph_text
         assert "path: projects/ASKS" not in graph_text
         assert "path: projects/ForBetterScience" not in graph_text
         graph_check = subprocess.run(
@@ -361,11 +627,20 @@ def main() -> None:
         synchronized_originals = {path: path.read_bytes() for path in synchronized_paths}
         for path in synchronized_paths:
             path.write_bytes(path.read_bytes() + b"\n")
+        provenance_path = destination / release.PROVENANCE_PATH
+        provenance_original = provenance_path.read_bytes()
+        provenance = release.json.loads(provenance_original)
+        provenance["payload_sha256"] = release.release_payload_sha256(destination)
+        provenance_path.write_text(
+            release.json.dumps(provenance, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
         synchronized = run("verify", str(destination))
         assert "Public release verified" in synchronized.stdout
         changed_path.write_bytes(original_changed)
         for path, content in synchronized_originals.items():
             path.write_bytes(content)
+        provenance_path.write_bytes(provenance_original)
 
         gitignore = destination / ".gitignore"
         original_gitignore = gitignore.read_text(encoding="utf-8")
@@ -400,4 +675,14 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            details = traceback.format_exc().replace("%", "%25")
+            details = details.replace("\r", "%0D").replace("\n", "%0A")
+            print(
+                f"::error title=Open source release regression failed::{details}",
+                file=sys.stderr,
+            )
+        raise

@@ -22,11 +22,14 @@ IMAGE_OCR_ALLOW_REMOTE=false
 IMAGE_OCR_API_BASE=${LLM_API_BASE}
 IMAGE_OCR_API_KEY=${LLM_API_KEY}
 IMAGE_OCR_MODEL=GLM-5.3-Flash
+IMAGE_OCR_REVIEW_MODEL=GLM-5.3-FlashX
 IMAGE_OCR_FALLBACK_MODEL=GLM-4.6V
 IMAGE_OCR_REASONING_EFFORT=low
 IMAGE_OCR_FALLBACK_REASONING_EFFORT=default
 IMAGE_OCR_MAX_TOKENS=8192
 ```
+
+`IMAGE_OCR_REVIEW_MODEL` 独立控制 API 复核；未指定时复用 `VISUAL_QA_MODEL`，再缺省为 `GLM-5.3-FlashX`。转写模型保持独立，复核身份回执记录实际调用模型。
 
 这些配置均可省略：base/key 复用主 API，模型缺省 GLM-5.3-Flash；不复制密钥，也不改动主语义模型。
 `IMAGE_OCR_ALLOW_REMOTE=false` 保留逐次 `--allow-remote-ocr` 授权；显式设为 `true` 是本项目图片摄入的持续上传许可，覆盖转写和复核两步，不扩展至 PDF/PPT 或其他视觉工具。仅配置 endpoint/key 或 `INGEST_BACKEND=api` 不构成许可。独立 OCR CLI 仍须 `--allow-remote`，不读取摄入编排器的持续许可。
@@ -104,6 +107,12 @@ finalize 前再次核对原图和暂存实体 SHA-256、companion 全文；缺�
 文字型图片与论文 PDF 一样，使用「原件 + 忠实 Markdown」双表示，共同组成一个 Raw 来源，
 不是两份相互印证的证据。原图是最终复核依据；Markdown 提供检索和行号引用；摘要、解释、
 项目关联及跨来源推断属于 Wiki，不写入转写正文。
+
+摄入完成后的普通文本事实检索采用 companion-first：`read-raw` 只返回 Markdown 的精确 locator，
+引用仍可指向原图。已读片段覆盖答案槽位后停止，不重新上传、OCR 或视觉查看原图。只有问题
+依赖版式、空间关系、颜色、图形、印章、签名、手写等视觉语义，相关复核项未决、证据冲突，
+或用户明确要求核对原图时，才显式进入独立视觉流程；纯照片、示意图和复杂图表不得仅凭 OCR
+companion 声称视觉内容已经核验。
 
 同目录归档示例：
 

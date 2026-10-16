@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -36,10 +37,44 @@ class SessionLog:
     def __init__(self, session_id: str | None = None):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self._events: list[SessionEvent] = []
+        self._journal_path = self._build_journal_path()
+
+    @staticmethod
+    def _build_journal_path() -> Path | None:
+        """Enable durable DSH journaling only inside an isolated build instance."""
+        if os.environ.get("ASKS_DSH_SCOPE") != "knowledge_build":
+            return None
+        raw_path = os.environ.get("DSH_SESSION_LOG_PATH", "").strip()
+        if not raw_path:
+            raise RuntimeError("knowledge_build scope requires DSH_SESSION_LOG_PATH")
+        path = Path(raw_path).resolve()
+        temp_root = (REPO / "temp").resolve()
+        if path == temp_root or temp_root not in path.parents:
+            raise RuntimeError("DSH session journal must stay inside the build temp directory")
+        return path
+
+    def _append_journal(self, event: SessionEvent) -> None:
+        if self._journal_path is None:
+            return
+        self._journal_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self._journal_path.parent, 0o700)
+        payload = (json.dumps(
+            {"ts": event.ts, "type": event.type, "data": event.data},
+            ensure_ascii=False,
+            default=str,
+        ) + "\n").encode("utf-8")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(self._journal_path, flags, 0o600)
+        try:
+            os.write(descriptor, payload)
+        finally:
+            os.close(descriptor)
+        os.chmod(self._journal_path, 0o600)
 
     def append(self, event_type: str, data: dict | None = None) -> SessionEvent:
         ev = SessionEvent(type=event_type, data=data or {})
         self._events.append(ev)
+        self._append_journal(ev)
         return ev
 
     def events(self) -> list[SessionEvent]:
@@ -75,6 +110,11 @@ class ToolDefinition:
     input_schema: dict
     execute_fn: Callable[[dict], str]
     timeout_ms: int | None = None
+    function_id: str = ""
+    audience: tuple[str, ...] = ()
+    allowed_callers: tuple[str, ...] = ()
+    effects: tuple[str, ...] = ()
+    maturity: str = ""
 
 
 @dataclass
@@ -175,9 +215,12 @@ class ToolRegistry:
         5. tools/post-execute 瀑布（accept/block/replace/add context）
         6. tool/result 事件记入 session log
         """
-        session_log.append("tool/call", {"name": exec_ctx.name,
-                                          "arguments": exec_ctx.arguments})
         tool = self._tools.get(exec_ctx.name)
+        session_log.append("tool/call", {
+            "name": exec_ctx.name,
+            "function_id": tool.function_id if tool else "",
+            "arguments": exec_ctx.arguments,
+        })
         if tool is None:
             result = ToolExecutionResult(content=f"[ERROR 未知工具: {exec_ctx.name}]",
                                          is_error=True, error_code="UNKNOWN_TOOL")

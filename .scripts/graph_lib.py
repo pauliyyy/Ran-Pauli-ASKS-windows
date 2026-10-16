@@ -14,6 +14,8 @@ import os
 import re
 import sqlite3
 from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import wraps
 from pathlib import Path
 
 try:
@@ -61,6 +63,80 @@ def domain_of_path(page_path):
         return first
     return None
 
+# Shared Agent/API scope. Never infer a private cache from mutable process globals.
+_GRAPH_SCOPE = ContextVar("wikigraph_graph_scope", default=None)
+
+
+def graph_connection_path(conn):
+    """Return the on-disk main DB; in-memory test graphs inherit their caller scope."""
+    for row in conn.execute("PRAGMA database_list"):
+        if row[1] == "main" and row[2]:
+            return Path(row[2]).resolve()
+    return None
+
+
+def private_graph_path(db_path):
+    if not db_path:
+        return False
+    # macOS temp paths start with /private/var; only this repository's domain
+    # directory is private storage. Do not follow a symlink at the domain root.
+    root = REPO.resolve() / "private"
+    return Path(db_path).resolve().is_relative_to(root)
+
+
+def validate_graph_target(page_path, db_path):
+    """Reject both logical and symlink/traversal domain escapes before opening SQLite."""
+    if not page_path or not db_path:
+        return
+    text = str(page_path).split("#", 1)[0].replace("\\", "/")
+    path = Path(text)
+    if path.is_absolute():
+        try:
+            text = path.relative_to(REPO).as_posix()
+        except ValueError:
+            return
+    domain = domain_of_path(text)
+    if domain is None:
+        return  # unprefixed semantic entities are scoped by their database
+    resolved = (REPO / text).resolve()
+    logical_private = domain == "private"
+    physical_private = private_graph_path(resolved)
+    if logical_private != physical_private or logical_private != private_graph_path(db_path):
+        raise ValueError("private/public graph domain mismatch")
+
+
+@contextmanager
+def graph_scope(db_or_conn):
+    """Scope all derived-state access, restoring nested/concurrent callers on exit."""
+    path = (graph_connection_path(db_or_conn) if hasattr(db_or_conn, "execute")
+            else Path(db_or_conn).resolve() if db_or_conn else None)
+    token = _GRAPH_SCOPE.set(path or _GRAPH_SCOPE.get())
+    try:
+        yield
+    finally:
+        _GRAPH_SCOPE.reset(token)
+
+
+def graph_scoped(function):
+    @wraps(function)
+    def scoped(conn, *args, **kwargs):
+        with graph_scope(conn):
+            return function(conn, *args, **kwargs)
+    return scoped
+
+
+def scoped_graph_path():
+    return _GRAPH_SCOPE.get()
+
+
+def graph_state_dir(conn=None, *, repo=None):
+    """Private derivative files live beside the selected private DB, never in public."""
+    db = (graph_connection_path(conn) if conn is not None else None) or scoped_graph_path()
+    if private_graph_path(db):
+        return db.parent
+    return Path(repo or REPO) / "cross-domain"
+
+
 CONFIDENCE_VALUES = {"可追溯", "推断", "存疑"}
 DEFAULT_CONFIDENCE = "可追溯"
 
@@ -102,7 +178,7 @@ def traversal_families(profile="", families=None, contract=None):
 # 管道版本号：影响 wiki/图边输出的建设变更才 bump。
 # 纯改名/重构不 bump；skeleton 模板/建边逻辑/prompt 调整等影响已入库内容的 bump。
 # re_ingest --outdated 据此判断哪些论文需重新摄入。
-CURRENT_PIPELINE_VERSION = 14  # v14: rank Chinese Wiki/Raw locators with deterministic CJK bigrams
+CURRENT_PIPELINE_VERSION = 18
 
 RAW_DOCUMENT_SUFFIXES = {
     ".md", ".txt", ".pdf", ".doc", ".docx", ".ppt", ".pptx",
@@ -192,7 +268,10 @@ def graph_writer_lock(db_path=None):
 
     target = Path(db_path or GRAPH_DB).resolve()
     digest = hashlib.sha256(str(target).encode("utf-8")).hexdigest()[:16]
-    lock_dir = REPO / "temp" / "graph-writer"
+    lock_dir = (REPO / "private" / "outputs" / "graph-writer"
+                if private_graph_path(target) else REPO / "temp" / "graph-writer")
+    if private_graph_path(target) and not private_graph_path(lock_dir):
+        raise ValueError("private graph lock escapes private storage")
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / f"{target.name}-{digest}.lock"
     with lock_path.open("a+", encoding="utf-8") as handle:
@@ -203,7 +282,44 @@ def graph_writer_lock(db_path=None):
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def connect(db_path=None):
+def backup_graph(conn, destination):
+    """Create a consistent SQLite snapshot, including committed WAL state."""
+    target = Path(destination)
+    if target.exists():
+        raise FileExistsError(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    backup = sqlite3.connect(target)
+    try:
+        conn.backup(backup)
+    finally:
+        backup.close()
+
+
+def restore_graph(snapshot, destination):
+    """Restore a checked snapshot. Caller must hold graph_writer_lock."""
+    if not Path(destination).is_file():
+        raise FileNotFoundError(destination)
+    source = connect(snapshot, read_only=True)
+    try:
+        live = sqlite3.connect(destination)
+        try:
+            source.backup(live)
+        finally:
+            live.close()
+    finally:
+        source.close()
+
+
+def connect(db_path=None, *, read_only=False):
+    if read_only:
+        target = Path(db_path or GRAPH_DB).resolve()
+        if not target.is_file():
+            raise FileNotFoundError(target)
+        conn = sqlite3.connect(target.as_uri() + "?mode=ro", uri=True,
+                               timeout=GRAPH_BUSY_TIMEOUT_MS / 1000)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn  # read-only access must never attempt schema migration
     conn = sqlite3.connect(db_path or GRAPH_DB, timeout=GRAPH_BUSY_TIMEOUT_MS / 1000)
     conn.row_factory = sqlite3.Row
     conn.execute(f"PRAGMA busy_timeout = {GRAPH_BUSY_TIMEOUT_MS}")
@@ -312,6 +428,19 @@ def connect(db_path=None):
         "CREATE INDEX IF NOT EXISTS idx_node_description_reviews_source "
         "ON node_description_reviews(node_path, source, id)"
     )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS identity_distinctions (
+            left_key TEXT NOT NULL,
+            right_key TEXT NOT NULL,
+            left_name TEXT NOT NULL,
+            right_name TEXT NOT NULL,
+            source TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            recorded_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (left_key, right_key)
+        )
+    """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS hub_scope_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -444,6 +573,18 @@ def init_schema(conn):
         proposed_description TEXT NOT NULL DEFAULT '',
         recorded_at TEXT DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (node_path) REFERENCES nodes(path) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS identity_distinctions (
+        left_key TEXT NOT NULL,
+        right_key TEXT NOT NULL,
+        left_name TEXT NOT NULL,
+        right_name TEXT NOT NULL,
+        source TEXT NOT NULL,
+        reason TEXT NOT NULL DEFAULT '',
+        recorded_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (left_key, right_key)
     );
 
     CREATE TABLE IF NOT EXISTS hub_scope_history (
@@ -595,6 +736,33 @@ def add_node_description_review(
         (
             str(node_path), str(origin_page), str(source), str(status),
             str(reason or ""), str(proposed_description or ""),
+        ),
+    )
+    return True
+
+
+def upsert_identity_distinction(
+    conn, left_key, right_key, left_name, right_name, source, reason="",
+):
+    """Persist one explicit keep-separate identity decision; never creates a graph edge."""
+    left_key = str(left_key or "").strip()
+    right_key = str(right_key or "").strip()
+    source = str(source or "").strip()
+    if not left_key or not right_key or left_key == right_key or not source:
+        return False
+    if left_key > right_key:
+        left_key, right_key = right_key, left_key
+        left_name, right_name = right_name, left_name
+    conn.execute(
+        "INSERT INTO identity_distinctions "
+        "(left_key,right_key,left_name,right_name,source,reason,recorded_at,updated_at) "
+        "VALUES (?,?,?,?,?,?,datetime('now'),datetime('now')) "
+        "ON CONFLICT(left_key,right_key) DO UPDATE SET "
+        "left_name=excluded.left_name,right_name=excluded.right_name,"
+        "source=excluded.source,reason=excluded.reason,updated_at=datetime('now')",
+        (
+            left_key, right_key, str(left_name or ""), str(right_name or ""),
+            source, str(reason or ""),
         ),
     )
     return True
@@ -1049,18 +1217,21 @@ def node_exists(conn, path):
 
 
 def ensure_node(
-    conn, path, title, node_type, source_type="", date="", status="current",
+    conn, path, title, node_type, source_type="", date="", status=None,
     has_raw=0, entity_subtype=None, ingest_version=None, description=None,
 ):
     """UPSERT 节点(不存在则建)。"""
+    validate_graph_target(path, graph_connection_path(conn))
     # 未显式提供的派生字段沿用旧值；UPSERT 不触发外键 ON DELETE 级联。
     existing = conn.execute(
-        "SELECT ingest_version,description FROM nodes WHERE path=?", (path,)
+        "SELECT ingest_version,description,status FROM nodes WHERE path=?", (path,)
     ).fetchone()
     if ingest_version is None:
         ingest_version = existing["ingest_version"] if existing else 0
     if description is None:
         description = existing["description"] if existing else ""
+    if status is None:
+        status = existing["status"] if existing else "current"
     conn.execute(
         "INSERT INTO nodes "
         "(path, title, type, entity_subtype, source_type, date, status, has_raw_source, ingest_version,description) "

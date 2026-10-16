@@ -21,11 +21,13 @@ _CONTROL_FLOW_STATUSES = frozenset({
 sys.path.insert(0, str(SCRIPTS))
 
 from dsh.harness import ToolDefinition
+from dsh.function_catalog import bind_tools
 import inbox_state
 
 
 _ERROR_CATEGORIES = {
-    "api_timeout", "extraction_failed", "semantic_failed", "graph_failed", "unknown",
+    "api_timeout", "extraction_failed", "semantic_failed", "graph_failed",
+    "code_defect", "unknown",
 }
 
 
@@ -54,15 +56,20 @@ def _classify_error_text(text: str) -> str:
     if any(p in text for p in ("timeout", "timed out", "timeoutexpired",
                                "connection timeout", "read timeout", "api timeout")):
         return "api_timeout"
+    if any(p in text for p in (
+            "traceback", "nameerror", "brokenpipeerror",
+            "ingest transition receipt mismatch", "illegal persisted ingest transition")):
+        return "code_defect"
+    if any(p in text for p in ("extractor.py", "所有引擎均失败", "ocr 返回空内容",
+                               "extract failed", "extraction failed", "提取失败",
+                               "mineru failed", "ocr failed", "empty content",
+                               "no extracted text", "no text extracted", "scanned document")):
+        return "extraction_failed"
     if any(p in text for p in ("bibliographic", "书目", "预审", "semantic", "slot",
                                "wiki validation", "wiki 校验", "agent_required", "handoff")):
         return "semantic_failed"
     if any(p in text for p in ("graph", "sqlite", "edge", "keyword", "hub")):
         return "graph_failed"
-    if any(p in text for p in ("extract failed", "extraction failed", "提取失败",
-                               "mineru failed", "ocr failed", "empty content",
-                               "no extracted text", "no text extracted", "scanned document")):
-        return "extraction_failed"
     return "unknown"
 
 
@@ -77,6 +84,8 @@ def _dsh_category(failure: dict | None) -> str:
         return "extraction_failed"
     if domain == "graph":
         return "graph_failed"
+    if domain == "code":
+        return "code_defect"
     if domain in {"semantic", "worker", "policy"}:
         return "semantic_failed"
     return "unknown"
@@ -158,7 +167,7 @@ def _ingest_call(args: list[str], timeout: int = 1800) -> str:
 
 def build_ingest_tools() -> list[ToolDefinition]:
     """构建 DSH 摄入工具。"""
-    return [
+    tools = [
         ToolDefinition(
             name="ingest_inbox_dry_run",
             description="扫描 inbox 并返回自动分类表（不执行摄入、不落库）",
@@ -283,6 +292,7 @@ def build_ingest_tools() -> list[ToolDefinition]:
                 "entrypoint": {"type": "string", "enum": ["inbox"],
                                "description": "统一摄入入口标记"},
                 "ocr_result": {"type": "string", "description": "显式指定的源绑定 OCR JSON 回执"},
+                "allow_remote_ppt": {"type": "boolean", "description": "调用方显式授权本PPTX的API内容识读；默认false"},
                 "allow_remote_ocr": {"type": "boolean", "description": "调用方显式授权图片上传；默认 false"}},
                 "required": ["file"]},
             execute_fn=lambda args: _ingest_call(["ingest_document.py", "--file", args.get("file", "")]
@@ -290,6 +300,7 @@ def build_ingest_tools() -> list[ToolDefinition]:
                 + (["--document-type", args["document_type"]] if args.get("document_type") else [])
                 + (["--source-kind", args["source_kind"]] if args.get("source_kind") else [])
                 + (["--ocr-result", args["ocr_result"]] if args.get("ocr_result") else [])
+                + (["--allow-remote-ppt"] if args.get("allow_remote_ppt") is True else [])
                 + (["--allow-remote-ocr"] if args.get("allow_remote_ocr") is True else [])
                 + (["--entrypoint", args["entrypoint"]] if args.get("entrypoint") else [])),
         ),
@@ -299,11 +310,13 @@ def build_ingest_tools() -> list[ToolDefinition]:
             input_schema={"type": "object", "properties": {
                 "txn": {"type": "string", "description": "事务 ID"},
                 "ocr_result": {"type": "string", "description": "可选的源绑定 OCR JSON 回执"},
+                "allow_remote_ppt": {"type": "boolean", "description": "调用方显式授权本PPTX的API内容识读；默认false"},
                 "allow_remote_ocr": {"type": "boolean", "description": "显式授权图片上传 OCR API"}},
                 "required": ["txn"]},
             execute_fn=lambda args: _ingest_call([
                 "ingest_document.py", "--resume", args.get("txn", "")]
                 + (["--ocr-result", args["ocr_result"]] if args.get("ocr_result") else [])
+                + (["--allow-remote-ppt"] if args.get("allow_remote_ppt") is True else [])
                 + (["--allow-remote-ocr"] if args.get("allow_remote_ocr") is True else [])),
         ),
         ToolDefinition(
@@ -315,3 +328,4 @@ def build_ingest_tools() -> list[ToolDefinition]:
             execute_fn=lambda args: _ingest_call(["re_ingest.py", "--raw", args.get("raw", "")]),
         ),
     ]
+    return bind_tools(tools)

@@ -2,6 +2,8 @@
 """playbook_dispatch.py regression tests."""
 import contextlib
 import importlib.util
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -84,10 +86,72 @@ def test_real_playbook_dispatches_class_meeting_proposal_to_workspace_items():
     assert "不触发会议纪要摄入" in result
 
 
+def test_real_playbook_dispatches_department_report_aliases():
+    for query in ("系会", "系会汇报", "系会：新增科研宣传汇报", "系会汇报：标记已汇报"):
+        result = module.dispatch(query)
+        assert result is not None
+        assert result.startswith("## 系会汇报\n")
+        assert "projects/科研副主任工作区/系会汇报" in result
+        assert "待汇报" in result and "已汇报" in result
+        assert "workspace_state.py item" in result
+        assert "不使用班子会 `proposal` 状态" in result
+        assert "不触发会议纪要摄入" in result
+        assert "## 班子会提案" not in result
+
+
+def test_real_playbook_dispatches_ingest_backend_model_aliases():
+    for query in (
+        "将ingest的后端模型改为agent",
+        "把 ingest 后端模型切换为 api",
+        "将摄入的后端模型设为 agent",
+        "修改摄入后端",
+    ):
+        result = module.dispatch(query)
+        assert result is not None
+        assert result.startswith("## 修改摄入后端\n")
+        assert "普通运行参数设置，不是建设任务" in result
+        assert "`.env` 的 `INGEST_BACKEND`" in result
+
+
+def test_real_playbook_dispatches_query_backend_model_aliases():
+    for query in (
+        "query backend是否也做了同样的处理",
+        "把 query 后端模型切换为 agent",
+        "将查询的后端模型设为 api",
+        "修改查询后端",
+    ):
+        result = module.dispatch(query)
+        assert result is not None
+        assert result.startswith("## 修改查询后端\n")
+        assert "普通运行参数设置，不是建设任务" in result
+        assert "`.env` 的 `QUERY_BACKEND`" in result
+        assert "private 查询" in result
+
+
 def test_dispatch_short_query():
     with playbook_fixture():
         result = module.dispatch("x")
     assert result is None
+
+
+def test_real_oral_entry_links_specialized_fast_playbook():
+    for query in ("/oral help", "/oral start 矩阵乘积态理解程度", "继续口试"):
+        result = module.dispatch(query)
+        assert result is not None
+        assert result.startswith("## 智能口试指令\n")
+        assert "operations/ORAL_EXAM_AGENT.md" in result
+        assert "oral receive" in result
+        assert "最终回复" in result
+        assert len(result) < 1000
+    playbook = (module.REPO / "operations/ORAL_EXAM_AGENT.md").read_text(encoding="utf-8")
+    for required in ("教授", "物理图像", "--displayed-message-id", "task_error", "task.commands.commit", "最终回复（final）"):
+        assert required in playbook
+    routed = subprocess.run(
+        [sys.executable, ".scripts/route.py", "--task", "oral_exam"],
+        cwd=module.REPO, capture_output=True, text=True, check=True)
+    assert "智能口试快路径" in routed.stdout
+    assert "原子确认" in routed.stdout
+    assert "最终回复（final）" in routed.stdout
 
 
 def test_list_entries():
@@ -101,6 +165,29 @@ def test_list_entries():
     assert "更新工程文档" in out
 
 
+
+@contextlib.contextmanager
+def public_playbook_fixture():
+    """Use declared synthetic dispatch entries; personal memory/ is not release source."""
+    original = module.PLAYBOOK
+    try:
+        module.PLAYBOOK = Path(__file__).parent / "fixtures" / "public-playbook-index.md"
+        assert module.PLAYBOOK.is_file()
+        yield
+    finally:
+        module.PLAYBOOK = original
+
+
+def test_missing_personal_playbook_is_a_clean_no_match():
+    with tempfile.TemporaryDirectory() as directory:
+        original = module.PLAYBOOK
+        try:
+            module.PLAYBOOK = Path(directory) / "not-installed.md"
+            assert module.dispatch("摄入 inbox") is None
+        finally:
+            module.PLAYBOOK = original
+
+
 def main():
     test_dispatch_hit_ingest()
     test_dispatch_prefers_explicit_specialized_trigger()
@@ -108,10 +195,16 @@ def main():
     test_dispatch_hit_update_docs()
     test_dispatch_no_match()
     test_real_playbook_dispatches_class_meeting_proposal_to_workspace_items()
+    test_real_playbook_dispatches_department_report_aliases()
+    test_real_playbook_dispatches_ingest_backend_model_aliases()
+    test_real_playbook_dispatches_query_backend_model_aliases()
     test_dispatch_short_query()
+    test_real_oral_entry_links_specialized_fast_playbook()
     test_list_entries()
     print("playbook dispatch regression: PASS")
 
 
 if __name__ == "__main__":
-    main()
+    test_missing_personal_playbook_is_a_clean_no_match()
+    with public_playbook_fixture():
+        main()

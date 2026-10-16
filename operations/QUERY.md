@@ -21,7 +21,9 @@
 
 - 触发信号：实体或名称可能有多写法/别名/译名、题目含多个可交叉线索、目标来源不明确、预计需要跨域或多轮检索、固定谓词路由未覆盖。
 - 策略内容：答案槽位 → 线索矩阵（实体/别名/主题/时间/来源类型）→ 候选定位顺序（库内结构化召回优先，再按索引与图扩展，最后才外部联想）→ 同名消歧与停止条件。
+- 任务驱动线索：先从用户目标提取核心事项、主要对象和待回答问题，再选择关键词；根据已核实材料补充正式名称、相关事项和版本线索。事项与机构等不同身份保持区分，不把相关词当同义词。图 search 的 title/aliases 无命中不等于正文无资料；按证据下钻规则在已定位子项目、文档包或 Wiki 范围补查正文，并沿来源回溯 Raw，不默认扩大到全库。
 - 执行约束：策略只约束检索范围和顺序，不预判证据充分性、不替代 `start → evidence → continue → answer`、Evidence Profile、槽位审计或 raw 回溯；发现新缺口时按具体缺口修正策略。
+- 建议、比较与“最优选择”题先拆出对象事实、判断方法、适用条件、候选方案依据；用这些槽位定位资料，不先选方案再搜索支持理由。已经定位的方法论或原始文献候选须按相关性取证，不能因个人档案强命中就提前停止。
 - API 首轮选择 `discover/read` 时必须返回 `strategy`；`status=drafted` 时 `slots/clues/search_order/stop_conditions` 均须非空，`status=skipped` 时须给出 `reason`。
 
 ---
@@ -41,6 +43,8 @@
 **跨域统一召回（v7）**：新动作 `wiki_recall(query, domain, topk)` 复用上述流程；`domain` 可为 `academic/admin/teaching/business`，为空表示跨域。`admin_recall` 保留为兼容入口。business 结果标记 `sensitive_review=true`，回答前必须按权限/敏感性复核，不能因召回命中直接扩散合同、财务或个人信息。
 
 **自适应联合召回（v10）**：关系、解释、探索和研究脉络问题优先调用 `hybrid_recall(query,intent,domain,topk)`，并行取得 Wiki narrative recall 与 Graph structural recall，再用按 intent 加权的 reciprocal-rank fusion 合并；不得直接相加 embedding、词频和图分数。简单事实已有唯一强命中时仍可走低成本 cascade。联合召回返回候选 `semantic_address` 和 section capsule，只用于定位，事实仍须下钻 Raw。
+
+`graph_exact` 的实体词抽取保留有辨识力的数学写法（如 `z*`、`|z|`、`Arg z`），并过滤“是什么/怎么算”等疑问词；裸单字母变量不单独扩散。别名命中仍只是导航候选，不替代 Wiki→Raw 证据链。
 
 **Hub Scope 召回**：`wiki_recall` 匹配 page 标题、Navigation 和论文 `## 研究方向定位`，并与图回退结果合并。需要检查论文→Hub 路由时调用只读 `hub_route`；需要审视 Hub Scope、parent 和成员时调用 `hub_inspect`。查询不再读旧 Hub `## 关键词`。
 
@@ -62,9 +66,36 @@
 >
 > **反哺**:query 只识别并记录知识缺口，不直接写 wiki 或 graph.db；经用户授权后，另起 `ingest update` 由既有校验流程编译入库。详见下方「反哺（缺口记录 → ingest update）」段。
 
+## private 查询范围
+
+private 是标准 query 的存储范围，不是另一套问答方法。共用 `start → evidence → continue（有缺口时）→ answer`、证据槽位、Raw 回溯与三审停止；范围限制不降低取证要求。个人资料、方法论、典籍或其他原始文献按当前问题共同参与检索，不能只读个人档案后用常识补齐结论。
+
+- 每个阶段传 `route.py --task query --subproject private --query-stage <stage>`，阶段卡给出 scope、数据库、日志与暂存位置。宿主 Agent 持有控制循环；private 路由不继承 `.env` 的公共 API backend。
+- 共用入口：`wg.py lookup <term> --subproject private`、`wg.py hybrid-recall <query> --domain private`、`wg.py neighbors <node> --subproject private`、`wg.py read-section <page#section> --subproject private`、`wg.py read-raw <raw#locator> --subproject private`。裸名和追问仍显式带范围；明确的 private 文件路径可被单次工具调用推断，但不代替会话范围。
+- Python 调用共用 `query_actions.execute(action, input, subproject="private")` 或 `query_actions.query_scope("private")`。图连接只读，Wiki/Raw/companion 的逻辑路径和物理路径须同域，嵌套动作不能切换范围。private 的 Wiki 与 Graph 联合召回使用同一算法，只选 private 图和目录。
+- 所有查询日志和暂存留在 `private/outputs/`；不写公共图、公共日志、缓存或共享会话目录，不进入 clean/GitHub。private 查询默认关闭远程 embedding，采用已有确定性名称/词汇回退；不发送外部搜索、OCR 或语义 API 请求。公共 API orchestrator 的已有会话固定公共范围，模型不能通过 action 参数自行读取 private。
+- 复用本会话已核验片段时记录来源与覆盖槽位；新增问题依赖不同前提时重新定位该前提。上一轮建议不能成为本轮的事实证据。
+- 五行命理问题在路由时携带 `--query "用户问题"`；`--query-topic auto` 按显式主题词派发。宿主根据上下文识别同主题短句追问，并显式传 `--query-topic metaphysics`，后续阶段沿用；切换问题时重新判断，`--query-topic general` 可覆盖词面命中。主题选择不改变 private 范围。
+
+## private 五行命理问答
+
+适用于 private 模式下的五行、八字、命理、风水及相关器物选择问题。职责是结合自身知识与 private 知识库，给出忠实、在能力范围内的最佳分析和实用建议。沿用标准 query 流程，宿主 Agent 负责理解问题、选择方法、综合判断。
+
+- **认真进入用户的问题框架**：按相关传统理论分析用户真正关心的问题，先给结论，再说明关键理由、适用条件和必要的不确定性。一般文化咨询不把科学验证作为作答前置，也不反复用“缺乏科学依据”替代分析；用户询问科学有效性时直接说明证据状况。
+- **综合两类知识**：用库内资料核对个人事实、既有记录及相关典籍，结合自身掌握的理论、流派差异与实践知识完成推理。库内没有现成结论时仍可给出有理由的判断；库外知识与本次推断如实标明，不虚构引文，也不冒称已检索验证。个人事实和声称出自某文献的内容仍须回溯来源。
+- **独立判断**：综合命局、旺衰、调候、通根、生克等与当前问题有关的条件，不机械数五行或照搬旧结论。流派有分歧时说明采用哪种思路及其理由；发现旧记录有误时明确指出，避免为了迎合而延续错误。
+- **给出可执行选择**：比较或摆放问题在条件足够时明确首选、备选及理由。允许基于传统框架作条件性推荐，清楚区分典籍原意、象征类比与个人推断；不把推断写成典籍定论或保证现实效果。只追问会实质改变判断的缺失信息，其余采用明确假设继续回答。
+- **把限制放在恰当位置**：说明真正影响结论的限制，篇幅与风险相称。涉及医疗、投资等重大现实决定时，将传统解释与相应专业证据分开；通常的配色、陈设和文化偏好问题聚焦用户的选择，不添加无关的风险清单。
+
+本节在命理主题的 `start` 和 `answer` 阶段派发；取证阶段保留主题标记。所有私人资料、检索与日志继续遵守 private 隔离规则。
+
 ## 全局规则
 
 **deprecated 过滤**:所有层检索结果默认过滤 `status: deprecated` 页面(遗忘策略落地后的对接口)。例外:用户明确询问历史版本/演进过程时,可读取 deprecated 页面,并配合 `superseded_by` 跳转现行版。
+
+共享 `wiki_recall`、`admin_recall`、`hybrid_recall` 在候选排名/top-k 前排除图或已读取 Wiki frontmatter 标为 deprecated 的页面，覆盖图回退与联合召回的所有候选通道。独立 `graph_search`/`query_graph search`/`wg lookup`/`wg abbr` 和 `semantic_search` 也在排名/top-k前按图生命周期过滤废弃页，不增加Wiki全库扫描。用户明确问历史版本时显式传 `include_deprecated: true`，CLI 使用 `--include-deprecated`；`intent: lineage` 不隐式启用。字符串 `false` 不会被当作真值，非法参数拒绝执行。
+
+**发现候选与导航上下文分开**：`node`、`neighbors`、`relations`、`hub_of` 保留历史节点、关系及通往现行邻页的路径，不通过删除历史端点过滤导航图。`material_role=historical_navigation`、`default_page_candidate=false` 和 `version_context.historical_page_paths` 标明旧页不能作为默认材料候选；`eligible_page_paths` 只表示可进一步下钻，不证明材料现行有效。Agent/API `node_resolve` 的身份 resolved 同样不等于页面现行，须检查 version_context。`path_exists` 仅报告连通性；显式 `temporal --at` 按时态事实有效期查询，不按当前节点状态屏蔽旧事实。Wiki召回另报磁盘 page_status 和 superseded_by；图层状态与Wiki生命周期须经受管写入同步，最终事实仍检查Wiki版本并沿精确Raw locator核验。
 
 **token 预算提示(程序预估+语义判断)**:编排层 `query_orchestrate.py` 实计每次读取 token 并累计。当 `token_used > token_budget × 0.7`(budget_warned)时,程序在返回结果里附 `budget_hint`:
 - 读 `Content` 时提示:后续候选页建议先读 `Navigation`(~100 tok)判相关再决定是否读 Content,或用锚点 `[[page#slug]]` 读子段
@@ -87,7 +118,9 @@
 3. 需核验 → 沿 frontmatter `sources` 下钻 raw
 4. 核验证据状态时,需 `[[page#slug]]` 锚点的 → 读对应 section 或 raw
 
-**Raw Locator（2026-08-25）**：统一使用 `python3 .scripts/wg.py read-raw '<path>#<locator>'` 做局部读取。Markdown/TXT 支持标题、`#L12`、`#L12-L18`；非论文且有文本层的 PDF 支持 `#page-3`、`#page-3-5`。工具可以机械扫描文件，但只把 locator 命中的片段送入 LLM；裸路径与 `#全篇` 均拒绝执行，Graph 中的 `#全篇` 仅是文件级 provenance，读取前必须细化 locator。命中片段超过单次上限时也拒绝返回半截内容，调用方须缩小章节、行范围或页码。原文件没有稳定可读 locator 时，沿 wiki `sources` 读取同目录 Markdown companion；不得因此把整份二进制文档送入模型。学术论文始终读取 MinerU `paper.md`，不得因 PDF 有文本层而绕过它。
+**Raw Locator（2026-08-25）**：统一使用 `python3 .scripts/wg.py read-raw '<path>#<locator>'` 做局部读取。Markdown/TXT 支持标题、`#L12`、`#L12-L18`；非论文 PDF 支持 `#page-3`、`#page-3-5`。工具可以机械扫描文件，但只把 locator 命中的片段送入 LLM；裸路径与 `#全篇` 均拒绝执行，Graph 中的 `#全篇` 仅是文件级 provenance，读取前必须细化 locator。命中片段超过单次上限时也拒绝返回半截内容，调用方须缩小章节、行范围或页码。检索回溯到 Raw 指的是确认事实来源身份，不要求把二进制原件本身送入模型：对于 PDF、Office、表格、图片等 Agent 不便直接读取的二进制格式，受管摄入必须保存同 stem Markdown companion；查询优先读取 companion，并在返回中区分 `source_path`（可引用原件）、`read_path`/`evidence_locator`（实际读取片段），读取投影不取代原件的事实来源身份。读取前机械校验同包 sidecar 的 `raw-companion-v1` 名称和双 SHA-256；明确损坏、缺字段或哈希失配时拒绝把 companion 送入模型，要求受管重建。缺少该字段的旧包标记为 legacy 兼容。分页 companion 的 `## Page N` 与 PDF `#page-N` locator 对应；历史 PDF 尚未补齐 companion 时才允许原生文本层页码读取作为兼容回退。若无可精确读取的原生 locator 且无 companion，则不得标记为已核验。学术论文始终读取 MinerU `paper.md`，不得因 PDF 有文本层而绕过它；回答可以引用程序返回的原始 PDF 路径。
+
+**图片 Raw 停止规则**：文字型图片、表单、截图和可忠实转写的表格在摄入后以“原图 + 源绑定 Markdown companion + sidecar”构成同一个 Raw 来源。普通事实检索命中图片时，默认只用 `read-raw` 读取 companion 的精确 locator；一旦该片段覆盖当前答案槽位即停止，不重新 OCR、不把原图送入视觉模型。只有当前问题依赖版式、空间关系、颜色、图形、印章、签名或手写等视觉语义，相关 OCR 未决项直接影响答案，证据发生冲突，或用户明确要求核对原图时，宿主才可另行进入视觉流程，并须在调用前说明具体缺口。纯照片、示意图或复杂图表没有可充分表达其视觉语义的 companion 时，不得用 OCR 文本假装已经核验。
 
 **Wiki Locator（2026-08-25）**：Wiki 是可重建的阅读导航层，使用稳定 heading slug，不使用 Wiki 行号。调用 `python3 .scripts/wg.py read-section '<wiki-page>.md#<heading-slug>'` 时，程序只返回目标 heading 到下一个同级/更高标题之间的正文，并解析该节实际使用的 `[^rN]` 脚注，返回 `raw_citations`。回答事实时再把这些 Raw locators 交给 `read-raw`；不得因读取 Wiki section 而自动读取整页或整份 Raw。
 
@@ -154,7 +187,7 @@
   - 节点名 embedding 余弦相似度 → top-50 截断 → softmax(温度 T) → 不重复采样 top-k
   - top-k 动态：按 evidence state 6 分量（C_slot/C_evidence/C_consistency 低→k 大广采,高→k 小精筛）+ 预算 联合定
   - 多轮可回采：visited 集合去重,没采中的下轮 CONTINUE 时从剩余里采
-  - embedding 模型：GLM-Embedding-3（复用项目 .env）；节点名向量预算缓存（graph.db `embeddings` 表），query 向量缓存（LRU 500 + TTL 7 天【初始工程参数】）
+  - embedding 模型：`embedding-3`（复用项目 `.env`）；节点名向量预算缓存按规范化 endpoint + model 隔离，query 向量缓存使用 LRU 500 + TTL 7 天【初始工程参数】
 - **层3 · LLM 确认 + 下钻指令合一（仅层2 采样后触发,小集合不跑）**：拿到采样候选（节点名+谓词）,LLM 一次性完成两件事,不分两步：
   1. **语义确认**：判断"这真是合作关系吗",筛掉误采
   2. **下钻指令**：对确认的候选直接给下钻指令（读哪个 raw、重点读哪段）
@@ -211,22 +244,31 @@
 
 ### 反哺（缺口记录 → ingest update）
 
-> **时机与边界**：query 完成回答后只记录候选缺口，绝不直接写 wiki、graph.db 或 raw。用户明确要求“反哺/更新知识库”后，另起 `ingest update`；由该流程更新 Wiki，并把 Wiki、Raw 文档包节点及 `Wiki → 来源 → Raw` 与导航关系增量写入 graph.db。
+> **时机与边界**：query 完成回答后记录使用反馈与候选缺口，不直接写 wiki、graph.db 或 raw。用户目标已明确包含反哺或知识修复时，按已有授权另起 `ingest update`；普通查询不自动授权更新。由更新流程修改 Wiki，并把 Wiki、Raw 文档包节点及 `Wiki → 来源 → Raw` 与导航关系增量写入 graph.db。
 >
 > **触发判据（满足任一时记录候选）**：
 > 1. **raw 重要事实缺口**：回答所需的重要事实已在可定位 raw 中确认，但对应 wiki 的 Navigation/Content 未覆盖，且 graph 无可用导航关系。
 > 2. **稳定导航缺口**：raw 支持可复用的实体—关系，补入后能明显缩短未来同类 query 的定位路径。
-> - **不记录**：低复用或仅服务本次问题的细节；无法稳定归属页面/实体的信息；尚未完成 raw 回溯验证的推测；完全失败（不知道具体遗漏什么）。
+>    包括重要事项已在 Wiki 表达、但缺少发现入口，或导航关系错挂、名称残留协议符号等经核实的问题。记录具体来源、目标页面和预期可到达路径；相关线索本身不证明同一身份或事实关系。
+> 3. **理解失真**：已回溯 Raw，确认 Wiki 漏掉关键条件、相反观点或未决状态，或把局部观察/待办加强为确定结论；即使已有图导航，也可登记修复候选。
+> - **不登记为已核实知识缺口**：低复用或仅服务本次问题的细节；无法稳定归属页面/实体的信息；尚未完成 raw 回溯验证的推测；完全失败而不知道具体遗漏什么。后两类仍可记录为待核实的使用反馈。
 >
 > **候选内容**：记录 raw 路径与 locator、目标 wiki 页面（已有或待建）、拟补的事实/关系及触发原因；不把未经 `ingest update` 编译和校验的候选视为知识库内容。
 > - **仅事实补全**：`ingest update` 更新 wiki；除非其形成稳定导航关系，否则不建 graph 边。
 > - **稳定导航关系**：先更新 Wiki，再由既有 graph 流程从已校验产物更新 graph；边 locator 可选，事实引用保存在 Wiki 的 Raw 脚注中。
 > - **可审计**：候选记录到 query-log `knowledge_gap` 字段（不写入 `index_enrichment`），供 LINT 审计价值、授权与最终落盘结果。
+> - **责任与回放**：摄入负责建立核心发现入口，query 负责补漏而不替代摄入质量。若缺口来自解析、归属或写图缺陷，先修复经证据确认的责任组件，再受管修复确认的数据；更新后回放原查询，核对召回、Wiki→Raw 可达性及误合并风险，不以新增边数验收，不新增关键词索引或独立模型审查。
+
+**使用反馈复用既有日志。** 直接命中、续查、联想与失败都可留下反馈，不以“是否走过联想层”为条件。仅在实际出现困难、收到用户纠正或验证了一条有复用价值的路径时记录，不要求每问评分或额外模型审查。`route`/`probe` 保存实际换词、绕路、空结果和命中路径；`answer_completeness_audit` 可补充用户反馈或已观察到的遗漏、过度确定、分歧丢失，并注明“待核实”或已有 Raw 核查结果。程序路径事实、用户意见和 Agent 判断分别注明，不能互相冒充；未测成本留空。记录仍属于运行反馈，不能作为事实源或直接参与图检索。
+
+**从反馈到修复。** 按影响、重复出现情况和修复成本选择少量候选。先判断是材料缺失、检索入口问题、编译失真，还是知识本身尚未确定；开放问题保留其不确定性。名称扩展可先在查询端处理；明确的来源表达失真经受管更新局部修正；反复出现的编译或校验问题转 build 定位责任组件。候选积压不阻断新摄入，不以用户满意度或重复回答作为真值，不因高频需求覆盖少见解释。
+
+**修复后回放。** 重新执行触发问题，检查证据可达、表述边界与查找负担；涉及名称或身份时，再检查一个邻近但含义不同的问题。新日志注明原问题与修复回执/报告，保留旧记录；只报告实际验证的改善。批量观察中保留少量开放探索问题，避免只优化高频事实问答。
 
 ## embedding 应用(v3,2026-07-25 局部引入)
 
 **已引入（局部）**：embedding 用于节点/Hub description 的语义候选、身份门控和 Hub 路由，不做全文向量检索；`hybrid_recall` 只将其候选排名作为一路 rank 信号。
-- 模型:GLM-Embedding-3(复用项目 `.env`,dim=2048,中英混排)
+- 模型：`embedding-3`（复用项目 `.env`，dim=2048，中英混排）
 - 节点名 embedding 预算缓存(graph.db `embeddings` 表,ingest 时算)+ query 向量缓存(LRU 500 + TTL 7 天【初始工程参数】)
 - 采样:节点名 + query 向量余弦 → 两阶段(top-k cutoff 截断 + softmax 温度 T)→ 不重复采样
 
@@ -241,6 +283,11 @@
 
 > **程序不裁决开放语义,但核验客观事实、约束执行过程、要求 LLM 对证据不足作显式说明**。
 > 边界:程序管"能不能这样查、证据实际什么状态",不管"你最终怎样理解证据";LLM 可自由理解,但不能虚构证据、无限绕圈、把未知说成已核验。
+
+## 科研代码证据（宿主 Agent）
+
+公共代码/算法/复现 query：宿主用 `wg.py code-library search/context/read`，详细契约按需加载 code-library 能力。
+只读、stale 拒读；目录/测试定义不是事实或运行证据，科学主张回 Raw。private/API 首版未开放。
 
 ## 最小证据与披露
 
@@ -420,16 +467,20 @@ LLM 据此判:来源是否足够、权威是否适合、时间是否匹配、标
 
 ## 证据下钻步骤
 
+**来源与论证分层**：Raw 可证明某来源写了什么，不自动证明该说法正确。分别识别用户事实、原始文献、现代整理、历史分析及本次推断；方法或适用条件有争议时，沿已定位来源回溯相关原文。整理表不冒充原文，转录完整性与作者归属未核实时保留限制。程序校验路径和 locator，语义执行主体判断来源质量与论证是否成立。
+
 3. **渐进分派**(双重审计控深度,见步骤 4):据步骤 2 探测结果渐进检索,每级证据够就停。**目标是组装相关文件集(非找单个文件)**,集大小由步骤 1 单/多源标志决定
 
    - **3a 三层筛**(见第二层「三层筛」):层1 谓词过滤 → 分支判断(≤cutoff 直接下钻 / >cutoff 采样+LLM 确认下钻指令)。route 字段记谓词过滤/采样/确认路径(审计防答案泄漏)
-   - **3b 下钻执行**(据 3a 路径分支):
-     - **小集合路径(候选 ≤ cutoff)**:程序机械读——按候选节点下钻,读 wiki 页 `Navigation` 判相关,相关读 `Content`,raw 源 grep 定位行号截取(禁头部切片);**只读 md 不读 pdf**(paper 页 sources 含 paper.md 和 pdf 时只读 md)
+    - **3b 下钻执行**(据 3a 路径分支):
+      - **小集合路径(候选 ≤ cutoff)**:程序机械读——按候选节点下钻,读 wiki 页 `Navigation` 判相关,相关读 `Content`,raw 源 grep 定位行号截取(禁头部切片);实际证据文本可来自原件的精确 locator 或同源 Markdown companion，引用仍可指向程序确认的原始 Raw 文件；**论文只读 MinerU md，不把 PDF 正文送入模型**
      - **大集合路径(候选 > cutoff)**:程序按 LLM 在层3 给的下钻指令(`[{node, read_raw, focus}]`)执行读 raw——LLM 已确认相关并指定读哪段,程序直接读指定 raw 的指定段
      - **降级 Raw 分级 grep**(Wiki 摘要不充分 / 无 Wiki 页时,事实必 Raw 回溯):优先从 Wiki `sources`/`raw_citations` 或 `来源` 边取得 Raw 文档包；可选边 locator 存在时直接使用。来源不足时才分级 grep 逐级扩大，禁默认全库（先已知子集 → 联想限定子集：子项目 raw 目录 / 时间范围 → 逐级扩大，每级命中即停）
    - **3c 联想层**(步骤 2 全 miss 时升级,capability experience + LLM + 网络合一):先运行 `experience_recall.py recall --capability query --event deadend` 获取最多 2-3 条泛化 pattern→参数化联想 3-5 词(+理由);参数化盲区且网络可用时,网络检索补强联想词→grep raw 定位→定向截取。**联想只定位不回答,事实必 raw 回溯**。**硬约束**:网络只帮想联想词,离事实隔两层,绝不可作事实来源。详见「第四层:联想层」
 
 ## 续查与停止步骤
+
+关键前提尚未查证且库内存在相关候选时，以该缺口、候选和预期收益进入 `continue`；“暂定”“仅供参考”不替代取证。若已取证仍无法支持方案排序，就交付限定性结论，不用相似性、象征对应或个人直觉补成确定排名。是否存在可行候选及证据是否充分仍由 Agent 判断，程序不模拟该判断。
 
 4. **三审停止**(控升级 + 终止,见「证据状态与动作协议」含槽位清单与缺口回检 v5):
 
@@ -450,16 +501,19 @@ LLM 据此判:来源是否足够、权威是否适合、时间是否匹配、标
    - 询问用户:是否翻倍 tokens 预算继续查?(立刻问,内存暂留中间状态,方案 A)
    - 用户确认 → 预算 ×2,从断点续查(visited 不重置、已读页不重读、evidence state 快照恢复);stop_reason: `BOUNDED_ANSWER → 用户扩预算 → CONTINUE(预算翻倍)`
    - 用户拒绝或预算已耗尽 → 维持 BOUNDED_ANSWER,诚实返回限定性回答
-   - **续查命中不反哺**(没走联想层,命中直接答);续查仍失败 = 真查不到,诚实返回
+   - 续查命中后按统一反馈判据记录有价值的路径或缺口；续查仍失败时说明已查范围与限制，可记录待核实的使用困难，不把本次未找到写成全库或领域不存在。
 
 ## 交付步骤
 
-5. **综合回答**,使用 `[[wikilinks]]` 引用来源
+5. **综合回答**,使用 `[[wikilinks]]` 引用来源；证据文本来自受管 Markdown companion 时，可引用 `read-raw` 返回的 `source_path` 原件，不必把 companion 冒充独立原始来源
+   - **阶段性边界**：综合性、前沿性回答简要说明本次核验的文献范围、回答时间和主要未覆盖部分；单一事实题用具体来源与适用条件表达即可。用户选择摄入的范围、本次检索覆盖与学科知识状态分别说明；本库无命中不能推出科学界无答案，新文献到达也不必然推翻旧结论。
+   - **重问与变化**：若任务要求比较旧回答，重新核验相关 Raw，说明哪些判断保持、补充、加强、限定、反驳或暂不能判；旧答案只作比较对象，不作事实源。已登记 Frontier Question 的版本与刷新沿现有入口处理；普通 query 不自动建立长期追踪或重算所有历史答案。最终表述由语义执行主体遵守本规范，程序不硬判语义覆盖完整。
+   - 建议与比较须区分已核验事实、来源观点、适用前提和本次推断；说明来源支持到哪一步，不将材料/颜色/名称的类比直接升级为个体效果或最优排名。
    - 对关键声明,用锚点链接精确定位:`[[papers/论文X#mpe-definition]]`
    - **诚实标注未确认部分**:若证据状态不完整,回答须区分已确认结论与未确认部分,明确缺失的是信息/证据/权威来源/有效版本/冲突解释中的哪类,禁止将尚未验证内容表述为事实
    - **多源综合**:跨源一致性/冲突检测,显式标注冲突,禁静默合并
 
-6. **回答后反哺判断**：按「反哺（缺口记录 → ingest update）」判定并记录 `knowledge_gap` 候选；query 到此结束，不直接写 wiki 或 graph.db。仅在用户明确授权后，另起 `ingest update` 落盘与校验。
+6. **回答后反哺判断**：按「反哺（缺口记录 → ingest update）」将使用困难记入既有日志，仅将经 Raw 核实、可复用的事实或导航缺口记入 `knowledge_gap`，不以关键词出现触发写入。候选注明来源 locator、目标页面和预期发现路径；摄入解析或归属缺陷先修责任组件。query 不直接写 wiki 或 graph.db；已有授权时另起 `ingest update` 修复确认数据，校验后回放原查询，检查正确召回及 Wiki→Raw 可达性；普通查询只记录候选。
 
 7. **查询日志**(v4,2026-07-23 动态检索流程落地):查询完成后追加一行 JSONL 到 `academic/wiki/outputs/query-log.jsonl`(或对应子项目 `*/outputs/`),字段对齐 testbed `trace-format.md`:
    - 必填:`ts`(时间戳)、`query`(查询)、`pages_read`、`evidence_profile`(程序供给的原始证据事实)、`stop_reason`(sufficient/no_actionable_candidate/budget_exhausted/loop_limit/tool_failure)、`decision`(回答/停止)、`tokens_est`/`tokens_actual`、`loop_count`

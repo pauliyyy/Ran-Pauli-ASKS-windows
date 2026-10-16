@@ -1,6 +1,6 @@
 # Write（写作）操作规范
 
-> `write` 是按需调用的**落笔能力**：使用可回溯事实与当前工作上下文生成文稿。它可以服务于独立办公写作，也可以作为 `research` 等持续工作状态中的组合能力；写作产物不自动成为知识库事实。智能体能力定义见 `agents/writer/AGENT.md`，其流程须与本规范一致。
+> `write` 是按需调用的**落笔能力**：使用可回溯事实与当前工作上下文生成文稿。它可以服务于独立办公写作，也可以作为 `research` 等工作状态中的组合能力；写作产物不自动成为知识库事实。智能体能力定义见 `agents/writer/AGENT.md`，其流程须与本规范一致。
 
 ---
 
@@ -12,7 +12,11 @@
 - 学术简历、个人简介、项目申报辅助材料、合作交流材料、会议介绍等专业材料；
 - 用户明确指定的 Markdown、Word、PDF、PPT 文字内容或版式文档。
 
-研究论文仍以 `research` 作为持续工作状态。Agent 真正开始起草、改写或润色论文正文时，在该状态内调用 `write` 的 academic profile；讨论研究问题、核对数据和运行实验时继续保持 `research`，无需加载写作能力。
+明确要求逐页协作制作原生可编辑 PPT 时，在当前状态内另加载 `python3 .scripts/route.py --capability presentation --capability-profile create`，其成熟度与当前可执行动作以 `operations/PRESENTATION.md` 为准；当前阶段1B已提供单页状态、整套导出与三个独立按需辅助入口，真实用户验收尚待完成。仅写 PPT 文字提纲或讲稿仍用本规范，图片/PDF 重建沿用独立重建能力。
+
+研究论文仍以 `research` 作为工作状态。Agent 真正开始起草、改写或润色论文正文时，在该状态内调用 `write` 的 academic profile；讨论研究问题、核对数据和运行实验时继续保持 `research`，无需加载写作能力。
+
+用户要求进入“论文到科普展板”创作或先讨论主题/受众/需求时，加载 `python3 .scripts/route.py --capability science-exhibit --capability-profile discuss`；这是可持续的协作创作流程，底层复用 writing 工作区或已有 research 状态。接续展板先读取目标项目 notes/status.md，再加载该能力的 resume profile 并调用 `wg.py science-exhibit resume --store <store>`；以当前受管记录恢复，不重新假设需求、批准方案或直接生成成品。精确边界见 `operations/SCIENCE_EXHIBIT.md`。
 
 先判定工作模式，而非机械依赖单个触发词：
 
@@ -96,6 +100,8 @@
 - 学术论文正文：保持 `research` 工作状态，调用 academic write profile，并同时应用 `operations/research/physics-manuscript-editing.md` 等相应学科写作 overlay。
 
 ### 3. 形成内容稿
+
+需要科普插图时，按需组合 `illustration` capability（`operations/ILLUSTRATION.md`），不切换写作状态。先确定要解释的段落、受众和唯一重点，再设计图意/类比、写提示词并制作；复用既有漫画 API 或原生绘画，不因普通写作自动联网。公众号按手机端图文配对检查，展板按观看距离检查，复用图意与素材而非固定版式。图注、替代文本、来源与科学边界随素材保存，科学标签优先可编辑层；API 成功不等于内容正确。
 
 - 先完成结构化内容，再压缩到用户要求的字数、页数或时长；
 - 每个原则性或能力性结论至少由一个具体事实锚定；

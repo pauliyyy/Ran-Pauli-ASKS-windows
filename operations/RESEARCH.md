@@ -15,8 +15,18 @@
 ### 与其他 task 的边界
 
 - **不路由 ingest**：研究内容是工作过程，不进 raw/wiki/graph。若用户要求把研究产出摄入知识库，切换到 ingest task。
-- **research 是持续状态，write 是按需能力**：研究笔记和论文文稿仍属于本工作流；真正开始起草、改写或润色时，在当前状态内调用 academic write profile，不切换研究上下文。正式公文/讲稿可从顶层直接调用通用 write profile。
+- **research 是工作状态，write 是按需能力**：研究笔记和论文文稿仍属于本工作流；真正开始起草、改写或润色时，在当前状态内调用 academic write profile，不切换研究上下文。正式公文/讲稿可从顶层直接调用通用 write profile。
 - **不路由 build**：改 `.scripts/` 或 `operations/` 是建设，走 build。
+
+## 公开研究模板
+
+公开 Linux 源码包含 projects/_templates/research/ 的通用文本骨架，供
+research_project.py init 原有入口使用；不包含作者或教师的具体项目数据。
+模板只记录计算配置键名，默认保留 server_preferred / ssh，不含地址或凭据。
+初始化测试在临时目录复制模板、替换参数并执行严格结构校验，不写实际项目。
+公开导出清单逐个批准十一份通用模板文件；实际项目、.env、.workspace 和派生结果不随模板导出。
+使用 WIKIGRAPH_PROJECTS_DIR 指定独立项目根时，须在其 _templates/research/
+提供同样的受控通用模板，具体项目与模板均由调用者明确选择。
 
 ## 进入研究项目
 
@@ -190,18 +200,42 @@ agent 在研究过程中遇到以下情况时，**无需用户要求**，新工�
 
 ## 产出物
 
-研究工作流的产出限于：
+研究工作流的产出包括：
 
 - **研究笔记**：`projects/<name>/notes/*.md`（手动或 agent 辅助撰写）
 - **论文文稿**：`projects/<name>/manuscript/*.tex` 或 `*.md`
+- **源码与测试**：项目 `codes/`；实验入口、分析和检查分别归入已有子目录。
+- **运行与派生结果**：项目 `outputs/`；记录版本、配置、输入、实际运行结果与验证范围，不能把测试定义当作已运行证据。
+
+跨项目的可复用实现可进入 `computing/code-library/`，独立按问题、模型、方法、算法和实现组织。
+宿主 Agent 按需使用 `wg.py code-library search/context/read` 定位已有能力；工作元图不作为事实源。
 
 产出物**不自动摄入知识库**。如需摄入，用户明确要求后切换到 ingest task。
 
 ## 可用计算资源
 
+### 默认选择与凭据
+
+用户指定计算服务器优先。数值实验、训练、参数扫描和长时间数据处理优先在已登记 SSH 服务器运行，
+不默认占用本机。宿主 Agent 读取本地 `.env` 的 `COMPUTE_PREFERRED_BACKEND=ssh` 与 SSH 配置选择执行位置；
+shared 程序不因此自动转发命令，API 路径仍遵守其原有授权与控制边界。
+
+- `.env` 的 `SSH_HOST`、`SSH_PORT`、`SSH_USER`、`SSH_PASS` 保存连接参数；文件不入 Git，权限为 0600。
+- 密码不进入 Raw、Wiki、图、项目 schema、源码、任务文件或日志；schema 只记录配置键名。
+- 轻量单元测试、lint、构建、解析和只支持 local 的固定诊断可在本地执行，明确说明例外。
+- 服务器不可达、主机身份未确认或缺少依赖时报告阻塞，不静默改成本地长任务。
+- 首次实际运行前核对主机指纹、工作目录、Python/依赖与资源；不把连接记录当成硬件/环境已核验。
+- 只上传任务必要的源码和输入，不上传 `.env`、private、整库或无关文件；下载产物写项目 outputs。
+
+新研究项目模板采用 `policy: server_preferred`、`backend: ssh`，runner 在具体任务中明确选择。
+既有项目不批量改写；Tensorizing Neural Networks 当前固定梯度检查保留 local，作为显式例外，
+后续分类训练优先服务器。现有 `code-run` 配方不支持 SSH，不因偏好变更宣称已有远程版本绑定回执。
+
+### 共享工具
+
 研究项目涉及数值模拟或 GPU 计算时，可使用 `computing/` 下的共享资源：
 
 - **`computing/GPU_TORCH_GUIDE.md`** — GPU + PyTorch 科学计算经验指南（性能陷阱、优化手段、autodiff 陷阱、基准测试方法）。涉及 GPU 计算前先读。
-- **`computing/ssh_run.py`** — SSH 远程执行工具（上传/执行/下载/状态查询），读取 `.env` 中的 SSH 配置。`python computing/ssh_run.py status` 查看服务器状态。
+- **`computing/ssh_run.py`** — 历史 SSH 远程工具（上传/执行/下载/状态查询），读取 `.env` 中的 SSH 配置；当前关闭主机密钥检查，密码传给 expect 命令参数。首次使用新凭据前须改用验证主机身份且不在进程参数传密码的入口；此次登记不调用它连接。
 
 这些资源由各研究项目积累，跨项目复用，不属于任何单个研究项目。

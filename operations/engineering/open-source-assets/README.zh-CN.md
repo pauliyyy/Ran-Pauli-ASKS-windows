@@ -10,6 +10,13 @@
 
 **项目更新日志：** [CHANGELOG.md](CHANGELOG.md)
 
+**平台版本：** 本仓库是 Shi-Ju Ran 开发的 macOS 版本；另有其他合作者开发维护的
+[Windows 版本](https://github.com/RuichengQu/Ran-ASKS-Windows)。安装方法与支持范围以
+各仓库说明为准；此入口不代表跨平台兼容性认证，也不授予 Reference Distribution 身份。
+
+**协作规则：** [治理](GOVERNANCE.md) | [ASKS 生态](ECOSYSTEM.md) |
+[贡献指南](CONTRIBUTING.md)
+
 **中文说明：** [在 GitHub 在线阅读](docs/introduction/ASKS-Chinese-Introduction-2026-09-03.md) |
 [下载或打印 PDF](docs/introduction/ASKS-Chinese-Introduction-2026-09-03.pdf) |
 [版本对应关系](docs/introduction/README.md)
@@ -68,6 +75,47 @@ Wiki 与图是并列的编译界面。Wiki 在来源资料和结构化导航之�
 边和 Hub 表达不断演化的知识结构，使人在结构中移动更加容易。事实性回答最终
 仍回到保留的来源记录。
 
+### ASKS 与检索的关系
+
+ASKS 不替代检索，而是治理检索前后的知识生命周期：保存证据、保留可修订解释、
+维护导航与研究状态，并把成果发布为可复用产物。
+
+| 关注点 | 检索系统通常提供 | Ran-ASKS 增加的能力 |
+| --- | --- | --- |
+| 寻找上下文 | 排序后的片段或记录 | 持久 Wiki 与图导航界面 |
+| 证据 | 检索文本和引用 | 回到保留来源的稳定 locator |
+| 修订 | 重新索引或生成 | 显式、受管的解释与状态更新 |
+| Agent 工作 | 请求或会话执行 | 类型化接力、校验、事务和回滚 |
+
+### 安装与首次成功体验
+
+支持基线为 Python 3.12 与 [`uv`](https://docs.astral.sh/uv/)。默认环境保持精简，
+不会调用模型或网络：
+
+```bash
+git clone https://github.com/ranshiju/Ran-ASKS.git
+cd Ran-ASKS
+uv sync --frozen
+uv run ran-asks doctor
+uv run ran-asks demo
+```
+
+synthetic demo 从临时 Graph 导航边进入 Wiki 解释，再回到精确 Raw 摘录，不写生产
+知识库。参与开发时使用 `uv sync --frozen --extra release` 和
+`uv run ran-asks test foundation`。`pdf`、`office`、`analysis`、`visual` 等能力
+extra 避免把无关解析与渲染依赖装入 Core 环境。
+
+已持久化的摄入事务可通过 `wg.py task status`、`next` 和 `verify` 只读查看。最终回执
+绑定协议状态、转换轨迹、validator 回执和声明产物哈希，但不声称 Wiki 解释一定被来源
+语义蕴含。foundation 测试还会运行离线合成的弱模型治理试卷，覆盖畸形输出、缺失证据、
+提示注入和 fallback 轨迹完整性。
+
+Agent 模式论文摄入使用一个版本化工作区完成书目复核、Wiki 编写和语义槽生成。每个
+非空书目字段都必须引用有界的来源行窗口，自适应章节阅读则让 Wiki 与语义输出继续
+受提取论文约束。validator 检查谓词角色，并禁止模型在语义槽中重复生成由程序负责的
+作者、期刊和论文主题边；全部通过后才由同一事务提交。人工确认的概念名称区分会保存
+为治理元数据，并在基于 embedding 的身份解析之前应用。
+
 ## 图片文档与带复核的摄入
 
 单帧文字型图片现在通过可复用、绑定原图哈希的 OCR 工具处理。原图与同名 Markdown
@@ -85,8 +133,9 @@ Agent 模式由当前宿主控制流程，API 模式由程序控制，两者共�
 操作入口及状态含义见[图片 OCR 与复核契约](operations/IMAGE_OCR.md)和
 [收件箱流程](operations/INBOX.md)。
 
-2026年9月8日更新将 `main` 的能力边界提升至 `v0.5.0`，不创建新标签或 Release，
-也不改变冻结论文产物。以后每批实际公开更新由 Agent 按功能与兼容性自动判断
+2026年9月8日更新曾将 `main` 的能力边界提升至 `v0.5.0`，当时未创建标签或 Release，
+也未改变冻结论文产物。从 `v0.12.0` 起，每个已发布 public-tree 版本都有不可变 Git
+标签；GitHub Release 只用于明确的里程碑或论文归档。每批实际公开更新由 Agent 按功能与兼容性自动判断
 PATCH／MINOR／MAJOR，不按文件数或行数排号；脚本记录依据、同步 Changelog，
 发布校验拒绝同版本或倒退更新。同批次重建不重复升版，详见
 [发布规范](operations/engineering/open-source-release.md)。公开仓库只包含通用实现
@@ -112,10 +161,139 @@ PATCH／MINOR／MAJOR，不按文件数或行数排号；脚本记录依据、�
 不以摄入日代替。远程图片转写与复核使用独立 API 配置和显式上传许可
 （`IMAGE_OCR_ALLOW_REMOTE` 默认 false），不改变语义 backend，也不冒充人工复核。
 
+## 已注册的产物工作流
+
+规范运行时功能注册表统一任务路由、CLI 暴露、backend 归属和机械校验。注册表明确
+区分研究、前沿等持久状态与一次性创建或更新受管产物的用户功能，因此不需要把每项
+操作都建模为长期状态，也能保持能力契约可检查、可验证。
+
+模板驱动的简历功能以工作区记录控制措辞和版本选择，但事实权威仍是受管 Raw。
+DOCX 模板定义页面样式和模块书签，配套 YAML 定义模块顺序、双语标签、类别映射和
+排序。正式渲染只接受具有可用 Raw 定位符的已核验记录，生成带日期且不可覆盖的
+DOCX 版本，并保存版本清单供后续比较。公开的
+[`templates/cv/`](templates/cv/) 模板包已经匿名化，不包含个人简历事实。
+
+可以这样创建本地示例工作区：
+
+```bash
+mkdir -p projects/cv-demo/templates
+cp templates/cv/academic-full.* projects/cv-demo/templates/
+cp templates/cv/cv-records.example.yaml projects/cv-demo/cv-records.yaml
+python3 .scripts/wg.py cv status --workspace cv-demo
+```
+
+只有在对应事实已经进入受管 Raw 后，才用真实记录替换示例值。核验和渲染命令见
+[`operations/CV.md`](operations/CV.md)。
+
+原生演示文稿制作遵循同一受管产物原则：保留持久修订，分离草稿批准与锁定边界，
+使用受约束布局生成确定性交付副本，并继承来源敏感性规则。演示文稿摄入与演示文稿
+制作仍是契约明确、彼此独立的功能。
+
+## 科普展板与可复用插图（preview）
+
+`wg.py science-exhibit` 围绕已摄入论文开展可接续的人机协作：讨论受众与用途，确定
+故事和视觉方案，再明确授权制作、检查实际预览。内部先核实论文贡献，面向公众的
+故事从动机出发，帮助读者连起目标、困难、研究做法和意义。类比可选，须说明对应
+关系与边界；可见英文缩写须展开。当前原生渲染器支持 A1/A0 竖版及有限可编辑示意，
+不是通用多位图海报拼版器。详见[展板契约](operations/SCIENCE_EXHIBIT.md)。
+
+共享[插图能力](operations/ILLUSTRATION.md) 复用原生 SVG/HTML 绘画与显式授权的位图
+API。先确定单图立意、受众、类比边界、使用位置、图注与替代文本，再制作。展板与
+手机端文章可复用含义和素材，不强行套同一版式；旧漫画与 storyboard 接口保持兼容。
+新 brief 入口处理公共域与 local_only，私有图片继续走已有隔离 CLI。普通写作或准备
+操作不会自动上传内容。
+
+可选模拟读者适配器在显式授权后，让两类独立角色只看实际整板 PNG，不提供论文或
+预期答案，检查读者能否理解动机、理解链在哪里中断。执行完成不是科学批准、真人
+证据、预览接受或发布许可。公众号评审须使用实际段落与配图语境，不能把户外展板
+提示冒充手机文章评估。这些能力不改变冻结论文产物。
+
+## 科研代码与图片数据工作流（preview）
+
+`wg.py code-library` 基于证据绑定工作目录，有界、只读地检索科研代码、方法和检查定义。
+公开的 [TT 示例](computing/code-library/README.md) 只含通用源码、测试与合成目录，不含
+本地 Raw 引用或项目实际运行记录；查询不执行检索到的代码。`wg.py code-run` 只在已配置
+研究项目中执行宿主明确选择的固定本地配方，保留输入、源码快照、结果与失败证据。
+通过本地检查不代表论文复现，详见[代码检索](operations/CODE_LIBRARY.md)与
+[显式运行](operations/CODE_RUN.md)。
+
+`wg.py extract-data` 离线处理显式标定的图片曲线／散点，不调用模型；保留图片绑定、
+有界 panel 处理、CSV、回绘及元数据。结果始终为 `needs_review`，是像素估计而非原始
+实验观测，详见[数据提取](operations/EXTRACT_DATA.md)。
+
+论文摄入复用经证据检查的模板族，API 候选表示仅压缩重复元数据；完整值、证据和
+校验门保持不变，Agent 直接取证控制循环保持独立。输入长度减少不等于实际 token、
+账单或线上质量改善已被验证。复杂建设先计划，方案以质量与效率为准，不以最小机制
+本身判定最优。
+
+## 持久接力、隔离私有域与幻灯片复用
+
+Agent 模式准备好的摄入事务现在可以用同一个 transaction ID 跨宿主会话接续。
+`wg.py task inspect` 返回类型化任务、声明的输入输出与下一步受管动作；只有必需输出
+已经存在时，`wg.py task advance` 才执行原事务声明的检查、恢复或提交命令。这样，
+长任务可以持续推进，但来源正文不会被复制进任务日志，临时状态也不会冒充证据。
+
+私有知识使用物理隔离的 Raw／Wiki 目录和 `private/graph.db`。私有摄入与查询复用
+确定性校验和来源寻址规则，但私有节点、索引与回执不会并入公共域图。源代码可用
+仓库只发布通用隔离工具及合成测试，不发布用户的私有内容或本机状态。
+
+原生演示文稿进一步分离确定性结构提取与绑定来源的视觉识读。可复用幻灯片组件
+保留来源 deck、可编辑性、布局 profile 与回执；项目专用图稿通过受管的可编辑矢量
+路径创建，远程调用仍需显式授权。Chat 与 Embedding 端点还可分别设置
+`LLM_API_PATH` 和 `EMBED_API_PATH`，兼容 URL 布局不同的服务商而无需改代码。
+PDF 页面 OCR 可配置独立且支持视觉输入的 `BLSC_OCR_*` 角色；未配置项才逐项
+复用对应的 `LLM_API_*`。
+具体边界见[摄入契约](operations/INGEST.md)、[演示文稿契约](operations/PRESENTATION.md)
+和[查询契约](operations/QUERY.md)。
+
+## 知识图可视化、可复用幻灯片模板与更可靠的会议维护
+
+`wg.py graph-visualize` 生成有界、只读的知识图视图，支持主题、邻域和关系筛选。
+配套的本地 provenance JSON 记录所选节点、边和来源定位符；可视化只用于导航，
+不构成事实证据。公共域与私有域图存储继续保持物理隔离。
+
+`wg.py slide-library` 通过明确的直接复用和参数化适配模式管理可复用演示模板。
+每个复用项目都保留来源和版本回执，生成结果留在选定项目工作区，供后续复核与交付。
+
+会议编译现在只保留最终生效的决议状态，把 Raw 引用导航收拢到 Content 下，并将
+无法解析的实体提及保存为质量警告，而不是臆造身份。事务性修复会在发布前校验计划
+中的 Wiki 与图变更，失败时回滚。自动生成人物页同样必须有真实 Raw 支持并通过图校验。
+
+## 可复现的公开发布
+
+公开仓库现在从显式、已提交的源快照生成，不再依赖任意本地工作树内容。发布编排器
+检查所有 manifest 选中文件，在临时目录构建并验证公开树，将源 commit／tree、manifest
+与 payload 哈希写入 `RELEASE_PROVENANCE.json`，然后在保留公开仓库 Git 元数据的
+前提下事务性安装；安装失败会恢复旧树。
+
+发布前还会核对远端 URL、分支以及 ahead／behind 状态。推送必须显式授权；分支与不可变
+版本标签原子推送并对照远端 commit，不使用 force push。GitHub Release 仍是独立的里程碑
+或论文归档动作。GitHub Actions
+会在 pull request 和 `main` 上重复执行发布边界、工程图、回归和冻结论文产物校验。
+中文介绍 PDF 还会逐页检查可提取文本、缺字标记和非空渲染。从本版本起，Changelog
+更新内容和语义版本判断同时使用英文与中文。
+
+## 独立社区下游
+
+Ran-ASKS 是由维护者主导的通用发行版和公开工程基线。其他团队可以针对自己的领域
+独立开发系统，其领域 Agent、数据、评测、发布、升级和用户支持不会因此转由
+Ran-ASKS 维护者负责。
+
+新的下游项目首先属于 **Community Downstream（社区下游）**，不会自动成为官方版本
+或 Reference Distribution。`ASKS-Compatible` 是绑定到明确 Ran-ASKS 版本和 commit
+的受评估身份；Reference Distribution 则需要持续维护、升级记录、可复现的兼容校验、
+领域评测以及清楚的数据和许可证边界，并由项目明确授予。目前 Ran-ASKS 没有指定任何
+官方领域发行版。
+
+由于当前 GitHub 仓库是受管生成的公开树，外部 pull request 只构成贡献提案。接受的
+修改会保留贡献者署名，先回灌权威源、完成完整验证，再通过受管流程重新发布。具体见
+[GOVERNANCE.md](GOVERNANCE.md)、[ECOSYSTEM.md](ECOSYSTEM.md)和
+[社区下游登记模板](templates/downstream/DOWNSTREAM.md)。
+
 ## 论文与代码版本
 
-`main` 分支持续开发，因此仓库可能比论文更新得更快。每个与论文对应的实现
-版本都会保存为不可变的 Git 标签和 GitHub Release。
+`main` 分支持续开发，因此仓库可能比论文更新得更快。从 `v0.12.0` 起，每个公开版本
+都有不可变 Git 标签；与论文对应的实现另外创建 GitHub Release 和冻结产物边界。
 
 | 论文版本 | Ran-ASKS 版本 | 论文数据产物 | 状态 |
 | --- | --- | --- | --- |
@@ -199,7 +377,11 @@ python3 paper-artifacts/v0.2.1/verify.py
 - 用于研究结构、谱系和跨来源导航的持久化 Hub。
 - 子 Hub 路由必须具有超出父 Scope 的子方向特异性证据；Agent 人工覆盖会保存为持久、关联事务的来源记录。
 - 项目范围的研究记忆，以及管理开放问题和演化轨迹的 Frontier 覆盖层。
+- 规范运行时功能注册表，区分持久工作状态与一次性用户功能，并校验其 CLI 和
+  backend 绑定。
 - 按需调用的学术写作能力，在实际落笔时组合共享写作约定、项目语境和学科语境。
+- 模板驱动的双语简历生成，包含证据闸门、匿名可复用模板和带日期的不可覆盖 DOCX 版本。
+- 原生演示文稿制作，包含持久修订、显式批准与锁定边界、受约束布局和确定性交付。
 - 面向图片、PDF 页面和静态 PPT/PPTX 页面的只读视觉检查。
 - 将图片/PDF 重建为可编辑 PPT，优先生成 PowerPoint 原生对象，并记录任何位图回退。
 - 通过已登记远程模型生成项目范围漫画图片，包含 dry-run、远程调用授权、输出路径保护和审计回执。
@@ -209,27 +391,69 @@ python3 paper-artifacts/v0.2.1/verify.py
 才能被准确理解时调用；普通文字编辑和编译不会自动触发。参见
 `operations/VISUAL_QA.md` 和 `operations/VISUAL_TO_EDITABLE_PPT.md`。
 
-## 快速开始
+## 提取恢复与按证据范围更新研究判断
+
+公开 PDF 在 MinerU 失败后，可以选择使用 PaddleOCR 官网文档解析 API。
+需在本机配置启用 `extraction.paddleocr.enabled`，设置 `PADDLEOCR_ACCESS_TOKEN`，
+并为本次提取显式传入 `--allow-paddleocr`；配置 token 本身不构成上传授权。
+private 输入禁止使用该后端。任务可从绑定来源的检查点恢复；请求、轮询、下载和
+返回附件都有预算，提取记录保留后端与回退原因。启用该回退但未授权时停止，
+不静默级联其他引擎。受管流程见 `operations/INGEST.md`。
+
+Frontier 将回答版本绑定本轮实际提供与引用的证据。刷新时优先读取问题自身来源，
+用重新核验的 Raw 摘录比较旧回答，并披露无法读取或可能截断的证据。
+回答只代表本轮证据范围内的判断，不宣称科学问题最终解决。未来研究候选会过滤
+参考文献和普通预期，但是否准入仍需独立的语义判断。
+
+已批准的 Hub 分裂完成后，通过批次维护报告对账，只读核验子 Hub 的 canonical
+Scope、分裂历史和成员完整迁移。仅闭合已满足的交接，保留其他待审动作与质量告警，
+同步关联事务回执；不重新摄入或调用 embedding。详见 `operations/INBOX.md`
+和 `operations/HUB.md`。
+
+## 智能口试（preview）
+
+智能口试是持久工作状态，包含准备中、待开始、口试中、已暂停与已结束。
+用 `/oral prepare <主题>` 共同确定可复用范围与 Raw 支持的考查目标，
+用 `/oral confirm` 确认方案，再用 `/oral start` 正式开始。
+暂停、恢复和结束分别使用 `/oral pause`、`/oral resume`、`/oral end`；
+`/oral status` 读取已记录状态，自然语言讨论不代替控制指令。
+
+新方案默认采用讨论诊断式：学生可以主动提问，考官可有依据地解释、纠正或引导
+自纠，帮助类型与原始回答完整保留。结束后基于私有完整对话独立评估，区分原本
+独立理解与帮助后的学习变化，不简单累计错误。已确认的旧方案保留原风格。
+API 执行要求显式 `ORAL_EXAM_BACKEND=api` 和逐次外发授权，整场评估也不例外；
+Agent 路径不隐式回落到 API。
+
+发送 `/oral help` 或运行 `ran-asks oral help` 可查看[独立使用帮助](operations/ORAL_EXAM_HELP.md)，
+宿主接入、私有存储与评估细则见[工程契约](operations/ORAL_EXAM.md)。当前为 preview，
+不是认证成绩；真实弱模型试用和教师验收仍必要。会议摄入同时强化了未确认角色
+保留与有来源依据的显式身份纠正，不凭模糊称谓创建全局身份。
+
+## Ubuntu 部署兼容性
+
+本版本支持 Ubuntu 22.04 及后续版本，要求 Python 3.12 或更高版本；系统默认
+Python 较旧时须另行提供 Python 3.12 解释器。上方的 frozen `uv` 安装是首选的
+可复现包环境；Linux requirements 清单仍可用于独立环境中的共享运行时与回归依赖：
 
 ```bash
-git clone https://github.com/ranshiju/Ran-ASKS.git
-cd Ran-ASKS
-python3 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install --upgrade pip
 python3 -m pip install -r requirements.txt
 python3 .scripts/ubuntu_preflight.py --python-only --strict
-cp .env.example .env
 python3 .scripts/engineering_graph.py validate
 ```
 
-Ubuntu 支持基线为 22.04 及后续版本、Python 3.10 或更高版本。文档转换、幻灯片
-渲染、OCR、桌面打开和可恢复清理所需的系统包，以及无桌面服务器和独立 Docling
-环境的设置，见 [Ubuntu 安装与验证指南](operations/UBUNTU.md)。
+文档转换、幻灯片渲染、OCR、桌面打开和可恢复清理所需的系统包，以及无桌面
+服务器和独立 Docling 环境的设置，见 [Ubuntu 安装与验证指南](operations/UBUNTU.md)。
 
-只有需要模型的工作流才需要在 `.env` 中配置模型后端。摄入编排由独立的
+## 使用真实材料
+
+只有所选工作流需要模型或远程提取后端时，才把 `.env.example` 复制为 `.env`。
+摄入编排由独立的
 `INGEST_BACKEND` 选择；API 摄入还可以通过 `INGEST_GENERATION_*` 和
-`INGEST_PROPOSITION_*` 分别设置生成模型与命题抽取模型，未设置时复用主 LLM。
+`INGEST_PROPOSITION_*` 分别设置生成与命题抽取的 endpoint、API path 和模型；
+专用 path 未设置时复用 `LLM_API_PATH`。
 可选漫画生成使用 `COMIC_IMAGE_*`、已登记图片模型，并要求每次真实调用显式传入
 `--allow-remote`；详见 `operations/COMIC_GENERATION.md`。
 随后阅读 `AGENTS.md`：
@@ -257,6 +481,7 @@ python3 .scripts/route.py --task query --query-stage start
 | `requirements.txt` | 共享 Python 运行时与回归依赖 |
 | `.scripts/` | 经过验证的命令行工具和回归检查 |
 | `dsh/` | 可选的受约束智能体循环和工具注册表 |
+| `templates/` | 匿名、可复用的产物模板和示例工作区记录 |
 | `academic/`、`admin/`、`teaching/`、`business/` | 相互独立的领域模板 |
 | `cross-domain/` | 跨领域图、Hub 和导航界面 |
 | `paper-artifacts/` | 与论文版本绑定的冻结、清理后 Wiki/图数据及测量结果 |
@@ -268,12 +493,14 @@ ASKS 是论文讨论的完整科学知识系统。部分内部路径和文档仍
 
 ## 验证
 
-修改后可以运行以下重点检查：
+修改 Core 后运行稳定的 foundation profile：
 
 ```bash
-python3 .scripts/test_prompt_audit.py
-python3 .scripts/engineering_graph.py validate
+uv run ran-asks test foundation
 ```
+
+`uv run ran-asks test release` 复现公开 CI 门禁，`uv run ran-asks test all` 发现全部
+确定性 Python 回归。日常建设任务仍由工程影响分析选择最小相关测试集合。
 
 公开版本构建与隐私审计参见
 `operations/engineering/open-source-release.md`。
@@ -295,6 +522,7 @@ Ran-ASKS 区分实际调用的软件与影响其架构的项目。下表说明�
 
 | 项目 | 关系 | 在 Ran-ASKS 中的范围 |
 | --- | --- | --- |
+| [Code Review Graph](https://github.com/tirth8205/code-review-graph) | 架构影响 | 人工治理工程图、最小上下文影响遍历、有界完整性和变更集验证契约；独立实现且不引入上游运行时 |
 | [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) | 架构影响 | DSH ToolRegistry、hook、session log、guard chain 和插件概念，由本项目用 Python 重新实现 |
 | [Semantica](https://github.com/semantica-agi/semantica) | 模式改编 | Ran-ASKS 图边界内的声明式约束、来源关系和时间有效性 |
 | [MinerU](https://github.com/opendatalab/MinerU) | 首选外部后端 | 论文摄入中的结构化 PDF 提取 |

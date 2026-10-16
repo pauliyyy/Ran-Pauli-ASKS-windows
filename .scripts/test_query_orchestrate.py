@@ -71,6 +71,12 @@ def test_intent_plan_defaults_to_hybrid_recall():
     plan = module.intent_to_plan({"query": "A 与 B 的关系", "intent": "relation"})
     assert plan[0]["action"] == "hybrid_recall"
     assert plan[0]["input"]["intent"] == "relation"
+    assert plan[0]["input"]["include_deprecated"] is False
+    history = module.intent_to_plan({"query": "旧版本", "include_deprecated": True, "need_graph": True})
+    assert history[0]["input"]["include_deprecated"] is True
+    assert history[1]["input"]["include_deprecated"] is True
+    parsed = module._build_step({"action": "wiki_recall", "query": "旧版本", "include_deprecated": "false"})
+    assert parsed["input"]["include_deprecated"] == "false"
 
 
 def test_hybrid_recall_fuses_wiki_and_graph_candidates():
@@ -89,14 +95,14 @@ def test_hybrid_recall_fuses_wiki_and_graph_candidates():
         conn.commit()
         original_connect = actions.gl.connect
         original_semantic = actions.ns.semantic_search
-        original_wiki = actions.wiki_recall
+        original_wiki = actions._wiki_recall_data
         original_capsule = actions._section_capsule
         actions.gl.connect = lambda *args, **kwargs: conn
         actions.ns.semantic_search = lambda *args, **kwargs: {
             "candidates": [{"node_id": "concept-a"}]
         }
-        actions.wiki_recall = lambda *args, **kwargs: (
-            json.dumps({"candidates": [{"path": "academic/wiki/papers/a", "title": "A"}]}), 1
+        actions._wiki_recall_data = lambda *args, **kwargs: (
+            {"candidates": [{"path": "academic/wiki/papers/a", "title": "A"}]}, {}
         )
         actions._section_capsule = lambda page, *terms: {
             "semantic_address": f"{page}#content", "raw_citations": ["raw.md#L1"]
@@ -106,7 +112,7 @@ def test_hybrid_recall_fuses_wiki_and_graph_candidates():
         finally:
             actions.gl.connect = original_connect
             actions.ns.semantic_search = original_semantic
-            actions.wiki_recall = original_wiki
+            actions._wiki_recall_data = original_wiki
             actions._section_capsule = original_capsule
             conn.close()
     result = json.loads(text)
@@ -210,6 +216,74 @@ def test_read_raw_recorded_in_read_sources():
         assert rel in s.read_sources, f"locator 未记入 read_sources: {s.read_sources}"
     finally:
         os.unlink(tmp.name)
+
+
+def test_companion_read_allows_original_file_citation():
+    """API 读取 companion 后，把唯一同 stem 原件加入 citation 白名单。"""
+    temp_root = REPO / "temp"
+    temp_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=str(temp_root)) as temporary:
+        folder = Path(temporary)
+        original = folder / "managed.docx"
+        companion = folder / "managed.md"
+        original.write_bytes(b"synthetic docx fixture")
+        companion.write_text("alpha\nverified evidence\n", encoding="utf-8")
+        companion_locator = companion.relative_to(REPO).as_posix() + "#L2"
+        original_source = original.relative_to(REPO).as_posix()
+        session = QuerySession(query="q", query_type="t", stage="evidence", mode="api")
+        out = module.execute_plan(
+            session,
+            [{"action": "read_raw", "input": {"locator": companion_locator}}],
+            is_continuation=False,
+        )
+        assert out["results"][0]["ok"], out["results"]
+        assert companion_locator in session.read_sources
+        assert original_source in session.read_sources
+        assert module._check_citations([original_source], session.read_sources)["ok"] is True
+
+
+def test_math_entity_terms_preserve_notation_without_bare_variable_noise():
+    actions = module.actions
+    assert actions._query_entity_terms("z*是什么")[0] == "z*"
+    assert actions._query_entity_terms("|z|怎么算")[0] == "|z|"
+    assert actions._query_entity_terms("Arg z")[:2] == ["Arg z", "Arg"]
+    assert "z" not in actions._query_entity_terms("Arg z")
+
+
+def test_math_alias_reaches_graph_exact_channel():
+    actions = module.actions
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    actions.gl.init_schema(conn)
+    page = "teaching/wiki/topics/complex-argument"
+    actions.gl.ensure_node(conn, page, "复数的辐角", "page")
+    actions.gl.ensure_node(conn, "complex-argument", "复数辐角", "entity")
+    actions.gl.insert_aliases(conn, "complex-argument", ["Arg z"])
+    conn.execute(
+        "INSERT INTO edges(subject,predicate,object) VALUES(?,?,?)",
+        (page, "涵盖", "complex-argument"),
+    )
+    conn.commit()
+    old_connect = actions._connect
+    old_wiki_recall = actions._wiki_recall_data
+    old_semantic_search = actions.ns.semantic_search
+    old_capsule = actions._section_capsule
+    actions._connect = lambda: conn
+    actions._wiki_recall_data = lambda *_args: ({"candidates": []}, {page: {"status": "current"}})
+    actions.ns.semantic_search = lambda *_args, **_kwargs: {"candidates": []}
+    actions._section_capsule = lambda *_args: {}
+    try:
+        text, _tokens = actions.hybrid_recall.__wrapped__(
+            "Arg z是什么", "relation", "teaching", "8"
+        )
+    finally:
+        actions._connect = old_connect
+        actions._wiki_recall_data = old_wiki_recall
+        actions.ns.semantic_search = old_semantic_search
+        actions._section_capsule = old_capsule
+    result = json.loads(text)
+    assert result["candidates"][0]["path"] == page
+    assert result["candidates"][0]["signals"][0]["channel"] == "graph_exact"
 
 
 if __name__ == "__main__":
