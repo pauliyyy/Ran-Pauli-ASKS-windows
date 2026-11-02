@@ -33,47 +33,8 @@ def test_real_manifest_preserves_original_questions_and_cross_domain_scope():
     cross_domain = next(case for case in cases if case["id"] == "real-autumn-plan")
     assert cross_domain["source"]["log"].startswith("academic/")
     assert cross_domain["domain"] == "admin"
-    # Historical target locators are frozen metadata; the author's Wiki corpus is not public.
-    assert all(benchmark.public_locator(target)
-               and target.startswith(case["domain"] + "/wiki/")
+    assert all((benchmark.REPO / (target + ".md")).is_file()
                for case in cases for target in case["expected"])
-
-
-def test_real_manifest_targets_replay_through_real_offline_wiki_recall():
-    """Exercise every frozen target in an explicit synthetic corpus, without private data."""
-    manifest = json.loads(benchmark.manifest_for_suite("real").read_text())
-    cases = benchmark.validate_manifest(manifest, suite="real")
-    actions = benchmark.load_actions()
-    with tempfile.TemporaryDirectory() as directory:
-        root = Path(directory).resolve()
-        database = root / "cross-domain/graph.db"
-        database.parent.mkdir()
-        connection = gl.connect(database)
-        gl.init_schema(connection)
-        for case in cases:
-            for target in case["expected"]:
-                page = root / (target + ".md")
-                page.parent.mkdir(parents=True, exist_ok=True)
-                page.write_text("# Synthetic navigation test fixture\n\n"
-                                "No historical or scientific fact is asserted.\n", encoding="utf-8")
-                gl.ensure_node(connection, target, "Synthetic fixture " + Path(target).name, "page")
-                gl.insert_aliases(connection, target, [case["query"]])
-        connection.commit()
-        connection.close()
-        assert all((root / (target + ".md")).is_file()
-                   for case in cases for target in case["expected"])
-        before = database.read_bytes()
-        with patch.object(benchmark, "REPO", root), patch.object(actions, "_REPO", root):
-            for case in cases:
-                sample = benchmark.run_probe(case)
-                assert sample["covered"] == sorted(set(case["expected"])), case["id"]
-                assert sample["target_hit"] and sample["target_recall"] == 1, case["id"]
-                assert sample["sql_selects"] > 0 and sample["wiki_reads"] > 0
-                assert all(target.startswith(case["domain"] + "/wiki/")
-                           for target in sample["candidates"]), case["id"]
-        assert database.read_bytes() == before
-        assert not (root / "private").exists()
-        assert not list(root.glob("*/wiki/outputs/query-log.jsonl"))
 
 
 def test_real_source_required_and_untrusted_metadata_bounded():

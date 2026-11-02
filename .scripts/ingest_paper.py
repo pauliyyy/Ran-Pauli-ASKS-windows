@@ -26,7 +26,7 @@ import yaml
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from unicodedata import combining, normalize
+from unicodedata import normalize
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / ".scripts"))
@@ -89,9 +89,10 @@ SLOTS_DELIMITER = "<<<SLOTS>>>"
 BIBLIOGRAPHIC_DELIMITER = "<<<BIBLIOGRAPHIC>>>"
 AGENT_WORKSPACE_PROTOCOL = "paper-agent-workspace-v1"
 AGENT_WORKSPACE_TASK_VERSION = "paper-agent-workspace-task-v6"
-AGENT_READING_CONTRACT_VERSION = "agent-paper-reading-v2"
+AGENT_READING_CONTRACT_VERSION = "agent-paper-reading-v3"
 AGENT_BIBLIOGRAPHIC_PROTOCOL = "evidence-bibliography-v1"
 AGENT_FULL_TEXT_MAX_CHARS = 40_000
+AGENT_READING_BATCH_MAX_CHARS = 18_000
 AGENT_VALIDATION_RECEIPT_VERSION = "paper-agent-validation-receipt-v1"
 BIBLIOGRAPHIC_VALIDATOR_VERSION = "bibliographic-review-validator-v3"
 WIKI_VALIDATOR_VERSION = "paper-wiki-validator-v2"
@@ -99,10 +100,15 @@ SEMANTIC_VALIDATOR_VERSION = "paper-semantic-validator-v3"
 GRAPH_PREFLIGHT_VALIDATOR_VERSION = "graph-plan-preflight-v2"
 BIBLIOGRAPHIC_CANDIDATE_PROVIDER_VERSION = "bibliographic-candidate-provider-v8"
 API_WORKSPACE_OPERATION = "ingest_paper_workspace"
+PAPER_CLAIM_QUALIFICATION_RULES = (
+    "保留原文的作者归属、推测/预期/已证语气、否定和适用条件；来源明确的猜想与不确定结论有价值，按其原有贡献、限制或展望角色保留完整命题，不升级为已证事实。",
+    "论断强度写在正文或 proposition 中，不把或许/应该/大概拼接为新谓词；应该可能表示规范要求，大概可能表示数值近似，须按原文语义表达。摄入模型没有把握或原文无依据的关系应留待核实或省略，不能靠添加可能来补救。",
+)
 PAPER_WIKI_CLAIM_RULES = (
     "定义、等式、定理和性能结论逐项回溯来源，保留对应对象、符号、条件与比较基准。",
     "同文出现的不同映射、算子或近似量分别核验；只陈述所引原文实际给出的性质，证据不足时缩减或删去。",
     "结构、脚注与 Graph 校验通过不替代来源事实核对。",
+    *PAPER_CLAIM_QUALIFICATION_RULES,
 )
 BIBLIOGRAPHIC_AUTHOR_MODE_GUIDANCE = """作者字段严格选择一种模式：
 - 候选模式：逐人核对原文作者及次序；候选可完整覆盖原文作者时，accepted_ids 按原文次序选择逐人候选 ID，proposed=[]；authors.status 使用 confirmed 或 corrected。其他错误、重复或多人合并候选不影响已核验完整候选组的使用。
@@ -133,10 +139,6 @@ SEMANTIC_PREDICATES = {
     "核心创新点", "局限性", "未来展望", "研究关键词", "对比方法", "所属", "就读", "导师",
     "指导", "基于", "紧密相关于", "应用于", "贡献于", "延伸至", "探索", "属于", "第一作者",
     "改进", "结合", "对比", "推广", "替代", "扩展",
-}
-PAPER_DIRECTION_PREDICATES = {
-    "主要研究", "基于", "紧密相关于", "应用于", "贡献于", "延伸至",
-    "涉及", "探索", "属于", "研究关键词",
 }
 PREDICATE_CANDIDATES_PATH = REPO / "cross-domain" / "predicate-candidates.jsonl"
 
@@ -232,6 +234,7 @@ def agent_paper_semantic_protocol() -> dict:
             "program_generated_predicates 由程序从 Wiki 与锁定书目生成，不写入语义槽",
             "concept 间关系两端必须是可独立指代的规范概念名",
             "每个 keyword concept 在概念说明中写一句有 Wiki 证据的局部说明",
+            *PAPER_CLAIM_QUALIFICATION_RULES,
         ],
     }
 
@@ -358,36 +361,6 @@ def _clean_title_candidate(title: str) -> str:
         return ""
     return text
 
-
-def _plain_front_matter_title_candidate(md_text: str) -> str:
-    """Recover a title from OCR text that did not preserve Markdown headings."""
-    status_or_noise = re.compile(
-        r"^(?:preprint(?:\s*,?\s*under review)?|under review|open access|"
-        r"research article|review article|article|paper|page\s+\d+|\d+)$",
-        re.I,
-    )
-    affiliation_or_identifier = re.compile(
-        r"\b(?:university|institute|institution|laborator(?:y|ies)|department|"
-        r"faculty|school|college|academy|center|centre|hospital|doi|arxiv)\b|"
-        r"@|https?://|\b[A-Z]{2}\s+\d{5}\b",
-        re.I,
-    )
-    for raw_line in md_text.splitlines()[:40]:
-        line = " ".join(raw_line.strip().split())
-        if not line or line == "---" or line.startswith("<!--"):
-            continue
-        marker = re.sub(r"^#{1,6}\s*", "", line).strip()
-        if re.match(r"^(?:abstract|introduction|摘要|引言|keywords?)\b", marker, re.I):
-            break
-        if status_or_noise.fullmatch(marker) or affiliation_or_identifier.search(marker):
-            continue
-        candidate = _clean_title_candidate(marker)
-        words = re.findall(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’-]*", candidate)
-        if 12 <= len(candidate) <= 300 and len(words) >= 3:
-            return candidate
-    return ""
-
-
 def extract_title_from_md(md_text: str) -> str:
     for line in md_text.splitlines():
         line = line.strip()
@@ -400,7 +373,7 @@ def extract_title_from_md(md_text: str) -> str:
         line = line.strip()
         if line.startswith("## "):
             return line[3:].strip()
-    return _plain_front_matter_title_candidate(md_text)
+    return ""
 
 
 def _acm_reference_citation(md_text: str) -> tuple[str, str]:
@@ -1262,16 +1235,11 @@ def _layout_venue_candidates(blocks: list[dict], doi: str = "", year: str = "") 
     )
     for block in blocks:
         for line in str(block["text"]).splitlines():
-            if AFFILIATION_HINT_RE.search(line) or "@" in line:
-                continue
             for pattern in patterns:
                 match = re.search(pattern, line.strip(), re.I)
                 if not match:
                     continue
                 value = " ".join(match.group(0).split()).strip(" .,;")
-                if (re.match(r"^(?:nature|science|cell)\b", value, re.I)
-                        and not re.match(r"^(?:Nature|Science|Cell)\b", value)):
-                    continue
                 key = _bibliographic_text_key(value)
                 if value and key not in seen:
                     seen.add(key)
@@ -1726,26 +1694,6 @@ def _unique_nonempty(values: list) -> list:
     return result
 
 
-def _author_identity_key(value: str) -> str:
-    """Normalize harmless PDF/OCR typography only for author identity comparison."""
-    decomposed = normalize("NFKD", " ".join(str(value or "").split()))
-    without_marks = "".join(char for char in decomposed if not combining(char))
-    return " ".join(re.sub(r"[^\w]+", " ", without_marks.casefold()).split())
-
-
-def _unique_authors(values: list[str]) -> list[str]:
-    """Keep the first display spelling while removing equivalent OCR variants."""
-    result = []
-    seen = set()
-    for value in values:
-        text = " ".join(str(value or "").split()).strip()
-        key = _author_identity_key(text)
-        if text and key and key not in seen:
-            result.append(text)
-            seen.add(key)
-    return result
-
-
 def _repeated_title_authors(md_text: str) -> list[str]:
     """Extract a full author line after a repeated publisher-wrapper title."""
     title = extract_title_from_md(md_text)
@@ -1792,27 +1740,12 @@ def _repeated_title_authors(md_text: str) -> list[str]:
             if authors:
                 groups.append(authors)
             break
-    return _unique_authors(max(groups, key=len, default=[]))
+    return max(groups, key=len, default=[])
 
 
 def bibliographic_quality_warnings(bibliography: dict, md_text: str) -> list[dict]:
     """Report deterministic bibliography defects that should degrade file quality."""
     warnings = []
-    review_notes = (bibliography.get("review") or {}).get("review_notes") or []
-    for note in review_notes:
-        text = str(note or "")
-        if text.startswith("AUTHOR_DIACRITIC_NORMALIZED|"):
-            _kind, value, evidence = (text.split("|", 2) + ["", ""])[:3]
-            warnings.append({
-                "issue": "bibliographic_author_diacritic_normalized",
-                "detail": f"author {value} matched normalized evidence at {evidence}",
-            })
-        elif text.startswith("AUTHOR_EVIDENCE_UNRESOLVED|"):
-            _kind, value, evidence = (text.split("|", 2) + ["", ""])[:3]
-            warnings.append({
-                "issue": "bibliographic_author_evidence_unresolved",
-                "detail": f"author {value} omitted because evidence at {evidence} could not be verified",
-            })
     title = str(bibliography.get("title") or "").strip()
     cleaned_title = _clean_title_candidate(title)
     if title and cleaned_title != title:
@@ -2578,40 +2511,10 @@ def compile_bibliographic_decision(
     schema_errors = bibliographic_decision_schema_errors(decision)
     if schema_errors:
         raise ValueError("candidate-id 书目裁决不符合 schema: " + "; ".join(schema_errors))
-    decision = copy.deepcopy(decision)
     indexes = {
         field: {item["id"]: item for item in catalog.get("fields", {}).get(field, [])}
         for field in BIBLIOGRAPHIC_REVIEW_FIELDS
     }
-
-    title_selection = decision["selections"]["title"]
-    title_candidates = list(indexes["title"].values())
-    if (
-        decision["doc_type"] == "paper"
-        and decision["review_status"] in {"clean", "corrected"}
-        and not title_selection["candidate_id"]
-        and title_selection["status"] == "ambiguous"
-        and len(title_candidates) == 1
-    ):
-        candidate = title_candidates[0]
-        value = str(candidate.get("value") or "").strip()
-        evidence = str(candidate.get("evidence") or "")
-        locator = re.fullmatch(r"paper\.md#L(\d+)(?:-L(\d+))?", evidence)
-        last_line = int(locator.group(2) or locator.group(1)) if locator else 0
-        words = re.findall(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’-]*", value)
-        if (
-            locator
-            and last_line <= 40
-            and 12 <= len(value) <= 300
-            and len(words) >= 3
-            and _clean_title_candidate(value) == value
-            and _bibliographic_evidence_contains(value, evidence, md_text)
-        ):
-            title_selection["candidate_id"] = candidate["id"]
-            title_selection["status"] = "corrected"
-            decision["review_notes"].append(
-                "程序已锁定前 40 行中唯一且可逐字核对的标题候选"
-            )
 
     def selected(field: str, candidate_id: str) -> tuple[str, str]:
         if not candidate_id:
@@ -2668,41 +2571,11 @@ def compile_bibliographic_decision(
         raise ValueError("authors.proposed 必须将 authors.status 与 review_status 标为 corrected")
     if not accepted_ids and not proposed and selections["authors"]["status"] != "ambiguous":
         raise ValueError("authors 未接受 candidate_id 或 proposed 时 status 必须为 ambiguous")
-    accepted_proposed, proposal_warnings, proposal_errors = _partition_author_proposals(
-        proposed, md_text,
-    )
+    proposal_errors = _validate_author_proposals(proposed, md_text)
     if proposal_errors:
         raise ValueError("authors.proposed 校验失败: " + "; ".join(proposal_errors))
-    normalized_review_notes = list(decision["review_notes"])
-    for warning in proposal_warnings:
-        prefix = (
-            "AUTHOR_DIACRITIC_NORMALIZED"
-            if warning["issue"] == "author_diacritic_normalized"
-            else "AUTHOR_EVIDENCE_UNRESOLVED"
-        )
-        normalized_review_notes.append(
-            f"{prefix}|{warning['value']}|{warning['evidence']}"
-        )
-    if proposed and rejected_ids:
-        # A corrected proposal may repeat an already-correct program candidate while
-        # the worker rejects the entire candidate set. The evidence-bound proposal
-        # is authoritative for output order; do not also record the same person as
-        # rejected merely because the worker chose proposal mode.
-        proposed_keys = {
-            _author_identity_key(item["value"]) for item in accepted_proposed
-        }
-        original_rejected_ids = list(rejected_ids)
-        rejected_ids = [
-            candidate_id for candidate_id in rejected_ids
-            if _author_identity_key(selected("authors", candidate_id)[0])
-            not in proposed_keys
-        ]
-        if rejected_ids != original_rejected_ids:
-            normalized_review_notes.append(
-                "程序已移除与 evidence-bound authors.proposed 同人的 rejected_ids"
-            )
     accepted = (
-        [(item["value"].strip(), item["evidence"].strip()) for item in accepted_proposed]
+        [(item["value"].strip(), item["evidence"].strip()) for item in proposed]
         if proposed else
         [selected("authors", candidate_id) for candidate_id in accepted_ids]
     )
@@ -2710,22 +2583,34 @@ def compile_bibliographic_decision(
     author_evidence = ", ".join(dict.fromkeys(
         evidence for _value, evidence in accepted + rejected if evidence
     ))
+    # Candidate rejection can discard a redundant provider record, not the
+    # person accepted through another ID. Keep the original ID decisions and
+    # both evidence addresses; the value-only review must not invent a conflict.
+    accepted_values = {value for value, _evidence in accepted}
+    redundant_rejected_ids = [
+        candidate_id for candidate_id, (value, _evidence) in zip(rejected_ids, rejected)
+        if not proposed and value in accepted_values
+    ]
+    review_notes = list(decision["review_notes"])
+    if redundant_rejected_ids:
+        review_notes.append(
+            "程序编译：以下被拒绝的作者候选 ID 与另一已接受 ID 的姓名完全相同，"
+            "仅排除冗余候选，不将该姓名列为拒绝作者；原 ID 裁决与证据保留："
+            + ", ".join(redundant_rejected_ids)
+        )
     bibliographic["authors"] = {
         "value": [value for value, _evidence in accepted],
         "evidence": author_evidence,
-        "rejected": [value for value, _evidence in rejected],
-        "status": (
-            "ambiguous"
-            if any(item["issue"] == "author_evidence_unresolved" for item in proposal_warnings)
-            else selections["authors"]["status"]
-        ),
+        "rejected": [value for candidate_id, (value, _evidence) in zip(rejected_ids, rejected)
+                     if candidate_id not in redundant_rejected_ids],
+        "status": selections["authors"]["status"],
     }
     return {
         "doc_type": decision["doc_type"],
         "review_status": decision["review_status"],
         "bibliographic": bibliographic,
         "conflicts": decision["conflicts"],
-        "review_notes": normalized_review_notes,
+        "review_notes": review_notes,
     }
 
 
@@ -2959,30 +2844,6 @@ def _bibliographic_evidence_contains(value: str, locator: str, md_text: str) -> 
     return len(needle) >= 2 and needle in haystack
 
 
-def _author_evidence_match(value: str, locator: str, md_text: str) -> str:
-    """Classify an evidence-bound person name without weakening its line boundary."""
-    if _bibliographic_evidence_contains(value, locator, md_text):
-        return "exact"
-    locator_text = str(locator or "").strip()
-    locator_parts = re.split(r"\s*[,;]\s*", locator_text)
-    if len(locator_parts) > 1:
-        matches = [_author_evidence_match(value, part, md_text) for part in locator_parts if part]
-        return "normalized" if "normalized" in matches else "none"
-    match = re.fullmatch(r"paper\.md#L(\d+)(?:-L?(\d+))?", locator_text)
-    if not match or not md_text:
-        return "none"
-    lines = md_text.splitlines()
-    start = int(match.group(1))
-    end = int(match.group(2) or start)
-    if start < 1 or end < start or end > len(lines) or end - start > 3:
-        return "none"
-    needle = _author_identity_key(value)
-    haystack = _author_identity_key(_bibliographic_evidence_text(lines[start - 1:end]))
-    if needle and re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", haystack):
-        return "normalized"
-    return "none"
-
-
 def _author_value_issue(value: str) -> str:
     """Return a deterministic reason when one author value is not one person."""
     text = " ".join(str(value or "").split()).strip()
@@ -3006,15 +2867,11 @@ def _author_covers_title_fragment(author: str, title_fragment: str) -> bool:
     """Match an author when MinerU appends a recognizable affiliation tail."""
     author = " ".join(str(author or "").split()).strip()
     title_fragment = " ".join(str(title_fragment or "").split()).strip()
-    author_key = _author_identity_key(author)
-    fragment_key = _author_identity_key(title_fragment)
-    if author_key and author_key == fragment_key:
+    if author == title_fragment:
         return True
-    if not author_key or not fragment_key.startswith(author_key + " "):
+    if not author or not title_fragment.startswith(author + " "):
         return False
-    author_token_count = len(author.split())
-    fragment_tokens = title_fragment.split()
-    suffix = " ".join(fragment_tokens[author_token_count:]).strip()
+    suffix = title_fragment[len(author):].strip()
     first = suffix.split(maxsplit=1)[0].strip(".,")
     return bool(
         AFFILIATION_HINT_RE.search(suffix)
@@ -3026,19 +2883,6 @@ def _author_appears_exactly(author: str, md_text: str) -> bool:
     needle = _bibliographic_text_key(author)
     haystack = _bibliographic_text_key(md_text)
     return bool(needle and re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", haystack))
-
-
-def _bibliographic_front_matter_line_limit(md_text: str) -> int:
-    """Bound evidence to the title/author block, not an arbitrary fixed line count."""
-    lines = md_text.splitlines()
-    hard_limit = min(len(lines), 120)
-    for index, line in enumerate(lines[:hard_limit], 1):
-        marker = re.sub(r"^\s*#{0,6}\s*", "", line).strip()
-        if index > 1 and re.match(
-            r"^(?:abstract|introduction|摘要|引言|keywords?)\b", marker, re.I,
-        ):
-            return max(1, index - 1)
-    return min(len(lines), 40)
 
 
 def _is_truncated_author_candidate(short: str, full: str, md_text: str) -> bool:
@@ -3061,64 +2905,36 @@ def _is_truncated_author_candidate(short: str, full: str, md_text: str) -> bool:
     )
 
 
-def _partition_author_proposals(
-    proposed: list[dict], md_text: str,
-) -> tuple[list[dict], list[dict], list[str]]:
-    """Separate safe author proposals from field-level evidence degradations."""
-    accepted = []
-    warnings = []
+def _validate_author_proposals(proposed: list[dict], md_text: str) -> list[str]:
+    """Validate Worker author expansions against the bounded title-page evidence."""
     errors = []
     seen = set()
     order_keys = []
     lines = md_text.splitlines()
-    front_matter_limit = _bibliographic_front_matter_line_limit(md_text)
     for item in proposed:
         value = str(item.get("value") or "").strip()
         evidence = str(item.get("evidence") or "").strip()
         match = re.fullmatch(r"paper\.md#L(\d+)(?:-L?(\d+))?", evidence)
-        if not match or int(match.group(2) or match.group(1)) > front_matter_limit:
-            errors.append(f"{value}: evidence 必须位于标题与作者书目前置区")
+        if not match or int(match.group(2) or match.group(1)) > 40:
+            errors.append(f"{value}: evidence 必须位于 Worker 标题邻域前 40 行")
             continue
+        if not _bibliographic_evidence_contains(value, evidence, md_text):
+            errors.append(f"{value}: 未在 {evidence} 逐字命中")
+        else:
+            start = int(match.group(1))
+            end = int(match.group(2) or start)
+            haystack = _bibliographic_text_key(
+                _bibliographic_evidence_text(lines[start - 1:end]))
+            order_keys.append((start, haystack.find(_bibliographic_text_key(value))))
         issue = _author_value_issue(value)
         if issue:
             errors.append(f"{value}: {issue}")
-            continue
-        key = _author_identity_key(value)
-        if not key:
-            errors.append(f"{value}: empty author identity")
-            continue
+        key = _bibliographic_text_key(value)
         if key in seen:
             errors.append(f"{value}: proposed 作者重复")
-            continue
         seen.add(key)
-        evidence_match = _author_evidence_match(value, evidence, md_text)
-        if evidence_match == "none":
-            warnings.append({
-                "issue": "author_evidence_unresolved",
-                "value": value,
-                "evidence": evidence,
-            })
-        else:
-            accepted.append(item)
-            start = int(match.group(1))
-            end = int(match.group(2) or start)
-            haystack = _author_identity_key(
-                _bibliographic_evidence_text(lines[start - 1:end]))
-            order_keys.append((start, haystack.find(key)))
-            if evidence_match == "normalized":
-                warnings.append({
-                    "issue": "author_diacritic_normalized",
-                    "value": value,
-                    "evidence": evidence,
-                })
-    if len(order_keys) == len(accepted) and order_keys != sorted(order_keys):
+    if len(order_keys) == len(proposed) and order_keys != sorted(order_keys):
         errors.append("proposed 作者顺序与 Raw 证据不一致")
-    return accepted, warnings, errors
-
-
-def _validate_author_proposals(proposed: list[dict], md_text: str) -> list[str]:
-    """Return only structural proposal failures; unresolved names degrade later."""
-    _accepted, _warnings, errors = _partition_author_proposals(proposed, md_text)
     return errors
 
 
@@ -3255,9 +3071,9 @@ def validate_bibliographic_review(
     rejected = set(authors.get("rejected") or [])
     unknown_authors = {
         author for author in accepted - author_candidates
-        if _author_evidence_match(
+        if not _bibliographic_evidence_contains(
             author, authors.get("evidence", ""), md_text,
-        ) == "none"
+        )
     }
     unknown_rejected = {
         fragment for fragment in rejected - author_candidates
@@ -3280,7 +3096,7 @@ def validate_bibliographic_review(
         author for author in expected_authors
         if not any(_author_covers_title_fragment(item, author) for item in accepted)
     ]
-    if missing_authors and authors.get("status") != "ambiguous":
+    if missing_authors:
         errors.append("authors 缺少标题作者块中的姓名: " + ", ".join(missing_authors))
     if (review.get("doc_type") == "paper"
             and review.get("review_status") != "manual_required"
@@ -3293,8 +3109,13 @@ def _paper_md_review_view(md_text: str) -> tuple[str, str]:
     """生成标题邻域和发表证据行窗口，不把全文送入书目预审。"""
     lines = md_text.splitlines()
     title_lines = []
-    front_matter_limit = _bibliographic_front_matter_line_limit(md_text)
-    for index, line in enumerate(lines[:front_matter_limit], 1):
+    for index, line in enumerate(lines[:40], 1):
+        if index > 1 and re.match(
+            r"^\s*#{0,6}\s*(?:abstract|introduction|摘要|引言|keywords?)\b",
+            line,
+            re.IGNORECASE,
+        ):
+            break
         title_lines.append(f"paper.md#L{index}: {line.strip()}")
     evidence_pattern = re.compile(
         r"\bDOI\b|doi\.org|10\.\d{4,}/\s|\bPublished\b|\bReceived\b|\bRevised\b|"
@@ -3354,10 +3175,10 @@ def build_bibliographic_review_prompt(catalog: dict, md_text: str) -> str:
 1. 只能引用候选目录中对应字段的 id；不选择时 candidate_id 写空字符串。
 2. 标量候选为空时 candidate_id="" 且 status="ambiguous"；year 保留 kind="unknown"，authors 保留完整数组字段。不得附加 value 或 evidence。
 3. authors.accepted_ids/rejected_ids 只能引用 author-*，不得重复或交叉。
-4. 按原文核验全部作者与次序；逐人候选可完整覆盖时优先使用 accepted_ids，proposed=[]。仅在候选无法完整覆盖时使用 proposed，每项 value 必须逐字出现在 evidence 指向的标题与作者书目前置区窗口。
+4. 按原文核验全部作者与次序；逐人候选可完整覆盖时优先使用 accepted_ids，proposed=[]。仅在候选无法完整覆盖时使用 proposed，每项 value 必须逐字出现在 evidence 指向的前 40 行窗口。
 5. proposed 不得包含 et al、机构或多人合并值；使用 proposed 时 authors.status 与 review_status 都必须为 corrected。
 6. rejected_ids 只标记候选目录中误识别为作者的机构或多人合并值；候选外机构仅可在 review_notes 描述。
-7. 无法裁决时对应 status=ambiguous 且 review_status=manual_required；不要猜测。
+7. 必要书目或已有候选的真实冲突无法裁决时，对应 status=ambiguous 且 review_status=manual_required；不要猜测。doi/arxiv_id 无候选是可选标识缺失，保留空 candidate_id 与 ambiguous；其余字段均已核验时整体可为 clean/corrected，不仅因空可选标识转人工。
 8. 一次返回所有字段，禁止建议后续逐字段调用。"""
 
 
@@ -3588,7 +3409,7 @@ def _resume_bibliographic_review(state: dict) -> bool:
         else:
             review = review_state["review"]
     else:
-        if (state.get("status") not in {"prepared", "agent_required"}
+        if (state.get("status") not in {"prepared", "agent_required", "bibliographic_review_required"}
                 or review_state.get("status") not in {"prepared", "agent_required"}):
             return False
         draft_path = _bibliographic_review_draft_path(state)
@@ -3890,6 +3711,7 @@ def _current_artifact_bundle_sha256(extract_dir: Path) -> str:
 TITLE_DEDUP_GATE = 0.95  # 标题相似度门槛：超过此值才作为候选进入 metadata 判断
 
 
+@ic.timed_ingest_step
 def step_dedup_check(state: dict) -> tuple[bool, str]:
     """判断论文是否已被摄入：标题提取 + 查图 + 查 raw 目录。
 
@@ -4062,6 +3884,7 @@ def _review_pending_relationship_after_bibliography(
     return True, ""
 
 
+@ic.timed_ingest_step
 def step_extract(state: dict) -> tuple[bool, str]:
     """封装 extractor.py，提取 PDF 为 paper.md；书目预审通过后写 manifest/persist。"""
     import shutil
@@ -4079,46 +3902,32 @@ def step_extract(state: dict) -> tuple[bool, str]:
         try:
             meta = yaml.safe_load(meta_path.read_text(encoding="utf-8")) or {}
             from paddleocr_api import is_official_paddleocr_record
-            source_sha256 = _file_sha256(pdf_path)
-            if _file_sha256(local_pdf) != source_sha256:
-                return False
-            preferred = str(meta.get("preferred") or "")
+            preferred = meta.get("preferred")
             record = ((meta.get("engines") or {}).get(preferred) or {})
-            if preferred == "mineru" or (
-                preferred == "paddleocr" and is_official_paddleocr_record(record)
-            ):
-                return record.get("input_sha256") == source_sha256
-            if preferred != "blsc_ocr":
-                return False
-            source_context = json.loads(
-                (extract_dir / "paper.pdf.source.json").read_text(encoding="utf-8")
-            )
-            companion = source_context.get("companion") or {}
             return (
-                companion.get("schema") == "raw-companion-v1"
-                and companion.get("original") == "paper.pdf"
-                and companion.get("companion") == "paper.md"
-                and companion.get("source_sha256") == source_sha256
-                and companion.get("companion_sha256") == _file_sha256(paper_md_path)
-                and (companion.get("generator") or {}).get("name") == "extractor"
+                (preferred == "mineru" or (
+                    preferred == "paddleocr" and is_official_paddleocr_record(record)))
+                and record.get("input_sha256") == _file_sha256(pdf_path)
+                and _file_sha256(local_pdf) == _file_sha256(pdf_path)
             )
         except (OSError, ValueError, TypeError, yaml.YAMLError):
             return False
 
-    if not reusable_extraction():
-        # Preserve only remote extraction workspaces across an interrupted extract.
-        for child in extract_dir.iterdir():
-            if child.name in {".mineru", ".paddleocr"} and not child.is_symlink():
-                continue
-            if child.is_dir() and not child.is_symlink():
-                shutil.rmtree(child)
-            else:
-                child.unlink()
-        command = [sys.executable, str(REPO / ".scripts/extractor.py"), "--external-pdf", str(pdf_path),
-                   "--paper", txn, "--papers-dir", "temp/inbox-extract"]
-        if not pdf_path.is_relative_to((REPO / "private").resolve()):
-            command.append("--allow-paddleocr")
-        run(command)
+    with ic.ingest_span(state, "pdf_extraction") as extraction_span:
+        extraction_span["cache_hit"] = reusable_extraction()
+        if not extraction_span["cache_hit"]:
+            for child in extract_dir.iterdir():
+                if child.name in {".mineru", ".paddleocr"} and not child.is_symlink():
+                    continue
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+            command = [sys.executable, str(REPO / ".scripts/extractor.py"), "--external-pdf", str(pdf_path),
+                       "--paper", txn, "--papers-dir", "temp/inbox-extract"]
+            if not pdf_path.is_relative_to((REPO / "private").resolve()):
+                command.append("--allow-paddleocr")
+            run(command)
     paper_md = extract_dir / "paper.md"
     if not paper_md.is_file():
         return False, "提取未生成 paper.md"
@@ -4137,10 +3946,11 @@ def step_extract(state: dict) -> tuple[bool, str]:
     state["extract_dir"] = str(extract_dir.relative_to(REPO))
     state["engine"] = engine
     md_text = paper_md.read_text(encoding="utf-8")
-    review_result = review_bibliographic_metadata(
-        state.get("bibliographic_meta"), md_text, state.get("transaction_id", ""),
-        agent_workspace=True,
-    )
+    with ic.ingest_span(state, "bibliographic_evidence"):
+        review_result = review_bibliographic_metadata(
+            state.get("bibliographic_meta"), md_text, state.get("transaction_id", ""),
+            agent_workspace=True,
+        )
     if (ingest_mode() == "api"
             and review_result.get("status") in {"ok", "prepared"}):
         workspace_ok, workspace_message = execute_api_paper_workspace(
@@ -4315,7 +4125,8 @@ def build_paper_semantic_contract() -> str:
 5. 期刊、作者、日期由程序从锁定书目生成，禁止在语义槽中重复填写或猜测；研究方向也不写入三元组，由程序使用 Wiki 定位句匹配 Hub Scope。
 6. 为三元组中的每个 keyword 概念写一句文档局部说明，只概括当前 Wiki 有 Raw 脚注支持的定义、角色或适用语境；不为 proposition 写 gloss，不输出 locator，locator 由程序机械绑定。概念说明行以第一个 `|` 分隔概念名和说明，说明内的数学竖线属于正文并原样保留。
 7. 主体用“本论文”代表当前论文。论文到概念只使用研究基础/核心方法/对比方法，论文到 proposition 只使用核心创新点/局限性/未来展望；主要研究/涉及/应用于/探索/属于等方向标签由程序根据 Wiki 定位句生成，不写成论文级三元组。概念间关系可使用基于/改进/结合/对比/推广/替代/扩展/应用于，且关系链至少有一个端点通过上述论文到概念谓词连接本论文。
-8. 优先使用以下已登记谓词：{semantic_predicate_guide()}。确有必要的新谓词只能是 1-12 个汉字或英文字母组成的简短关系词，不得是句子、短语或带标点描述。"""
+8. 优先使用以下已登记谓词：{semantic_predicate_guide()}。确有必要的新谓词只能是 1-12 个汉字或英文字母组成的简短关系词，不得是句子、短语或带标点描述。
+9. {" ".join(PAPER_CLAIM_QUALIFICATION_RULES)}"""
 
 
 def build_agent_wiki_slots_prompt(paper_md_path: Path, skeleton: str, errors: list[str] | None = None) -> str:
@@ -4448,8 +4259,8 @@ def build_api_paper_workspace_prompt(
 [A. 书目裁决]
 1. 输出 {BIBLIOGRAPHIC_DECISION_PROTOCOL} JSON，一次裁决 title/authors/year/venue/doi/arxiv_id；除 authors.proposed 外只能引用对应字段的候选 ID。
 2. 标量候选为空时 candidate_id="" 且 status="ambiguous"；year 还须保留 kind="unknown"，authors 保留完整数组字段。不得附加 value 或 evidence。
-3. authors.accepted_ids/rejected_ids 只能引用 author-* 且不得交叉；按原文核验作者及次序后优先选择完整逐人候选组。候选确实不完整时 accepted_ids=[]，authors.proposed 按原文顺序逐人给 value 与 evidence，evidence 为标题与作者书目前置区内的 paper.md#Lx[-Ly]。
-4. 无法裁决时字段 status=ambiguous 且 review_status=manual_required，不猜测；published/published_online 优先于 accepted/received/revised/preprint。
+3. authors.accepted_ids/rejected_ids 只能引用 author-* 且不得交叉；按原文核验作者及次序后优先选择完整逐人候选组。候选确实不完整时 accepted_ids=[]，authors.proposed 按原文顺序逐人给 value 与 evidence，evidence 为前 40 行 paper.md#Lx[-Ly]。
+4. title/authors/year 等必要书目或已有候选的真实冲突无法裁决时，字段 status=ambiguous 且 review_status=manual_required，不猜测。doi/arxiv_id 无候选时是可选标识缺失：保留空 candidate_id 和 ambiguous，不因此单独将整体判为 manual_required；其余字段均已核验时整体使用 clean 或 corrected。published/published_online 优先于 accepted/received/revised/preprint。
 5. 合法枚举（每次只选一个值，不输出竖线拼接）：
 {json.dumps(BIBLIOGRAPHIC_ENUMS, ensure_ascii=False)}
 JSON 必须严格填写以下已通过 schema 的未决模板，不增删 key；candidate_id 从本次目录选取，不虚构 ID：
@@ -4539,8 +4350,10 @@ def _agent_reading_contract(paper_md: Path, workspace: dict | None = None) -> di
     """Describe how the host Agent should read one extracted paper."""
     workspace = workspace or {}
     source_chars = int(workspace.get("source_character_count") or 0)
+    source_text = ""
     if paper_md.is_file():
-        source_chars = len(paper_md.read_text(encoding="utf-8"))
+        source_text = paper_md.read_text(encoding="utf-8")
+        source_chars = len(source_text)
     mode = str(workspace.get("reading_strategy") or "")
     if mode not in {"full", "adaptive_sections"}:
         mode = "full" if source_chars <= AGENT_FULL_TEXT_MAX_CHARS else "adaptive_sections"
@@ -4548,30 +4361,86 @@ def _agent_reading_contract(paper_md: Path, workspace: dict | None = None) -> di
         relative_path = str(paper_md.relative_to(REPO))
     except ValueError:
         relative_path = str(paper_md)
-    section_command = " ".join([
+    source_base = str(workspace.get("raw_source_placeholder") or relative_path)
+    command_prefix = [
         "python3", ".scripts/read_paper.py", shlex.quote(relative_path),
-        *AGENT_READING_SECTIONS,
-    ])
+        "--source-lines", "--source-path", shlex.quote(source_base),
+    ]
+    batches = []
+    if mode == "full":
+        first_line = 1
+        output_chars = 0
+        for line_number, line in enumerate(source_text.split('\n'), 1):
+            cost = len(f"<{source_base}#L{line_number}> {line}\n")
+            if output_chars and output_chars + cost > AGENT_READING_BATCH_MAX_CHARS:
+                batches.append({"start_line": first_line, "end_line": line_number - 1,
+                                "required_output_chars": output_chars})
+                first_line = line_number
+                output_chars = 0
+            output_chars += cost
+        batches.append({"start_line": first_line, "end_line": line_number,
+                        "required_output_chars": output_chars})
+        for batch in batches:
+            batch["command"] = " ".join(command_prefix + [
+                "--full", "--start-line", str(batch["start_line"]),
+                "--end-line", str(batch["end_line"]),
+            ])
+    else:
+        import read_paper
+        hits = read_paper.extract_sections(
+            paper_md, AGENT_READING_SECTIONS, source_lines=True, source_path=source_base,
+        )[0] if paper_md.is_file() else []
+        sizes = {requested: len(content) + len(title) + len(requested) + 16
+                 for requested, title, content in hits}
+        if not hits and not any(line.lstrip().startswith("## ") for line in source_text.splitlines()):
+            sizes[AGENT_READING_SECTIONS[0]] = sum(
+                len(f"<{source_base}#L{number}> {line}\n")
+                for number, line in enumerate(source_text[:9000].split('\n'), 1)
+            )
+        selected = []
+        output_chars = 0
+        for section in AGENT_READING_SECTIONS:
+            cost = sizes.get(section, 0)
+            if selected and output_chars + cost > AGENT_READING_BATCH_MAX_CHARS:
+                batches.append({"sections": selected, "required_output_chars": output_chars})
+                selected = []
+                output_chars = 0
+            selected.append(section)
+            output_chars += cost
+        if selected:
+            batches.append({"sections": selected, "required_output_chars": output_chars})
+        for batch in batches:
+            batch["command"] = " ".join(command_prefix + [shlex.quote(section) for section in batch["sections"]])
+    for batch in batches:
+        batch["over_budget"] = batch["required_output_chars"] > AGENT_READING_BATCH_MAX_CHARS
+    section_command = batches[0]["command"]
     return {
         "version": AGENT_READING_CONTRACT_VERSION,
         "mode": mode,
         "source_character_count": source_chars,
         "full_text_threshold": AGENT_FULL_TEXT_MAX_CHARS,
+        "batch_output_budget_chars": AGENT_READING_BATCH_MAX_CHARS,
         "read_policy": {
             "protocol": "read_once_then_reuse",
-            "sections": "read_one_section_per_call_then_follow_specific_evidence_gaps",
+            "sections": "batch_known_sections_then_follow_specific_evidence_gaps",
+            "source_lines": "original_file_lines_preserved_across_discontinuous_ranges",
+            "completion": "read_every_primary_batch; oversized_batches_require_original_line_windows_or_larger_output_budget_not_truncation",
             "reports": "read_status_diagnostics_and_next_actions_before_detail",
         },
         "primary": (
-            {"action": "read_full", "path": relative_path}
+            {"action": "read_full", "path": relative_path,
+             "command": section_command, "batches": batches}
             if mode == "full"
             else {
                 "action": "read_sections",
                 "sections": list(AGENT_READING_SECTIONS),
                 "command": section_command,
+                "batches": batches,
                 "section_commands": {
                     section: " ".join([
                         "python3", ".scripts/read_paper.py", shlex.quote(relative_path),
+                        "--source-lines", "--source-path",
+                        shlex.quote(source_base),
                         shlex.quote(section),
                     ]) for section in AGENT_READING_SECTIONS
                 },
@@ -4754,10 +4623,10 @@ def _api_telemetry_payload(state: dict) -> dict:
 def prepare_agent_workspace_handoff(state: dict, review_result: dict, paper_md: Path) -> None:
     """Create one prompt-free Agent task after extraction without final writes."""
     extract_dir = paper_md.parent
-    reading = _agent_reading_contract(paper_md)
     skeleton_path, _skeleton, raw_placeholder = _write_workspace_skeleton(
         state, paper_md,
     )
+    reading = _agent_reading_contract(paper_md, {"raw_source_placeholder": raw_placeholder})
     output_path = extract_dir / "agent-workspace.txt"
     bibliographic_pages_path = extract_dir / "first-two-pages.txt"
     if not bibliographic_pages_path.is_file():
@@ -4991,6 +4860,7 @@ def prepare_agent_workspace_handoff(state: dict, review_result: dict, paper_md: 
     )
 
 
+@ic.timed_ingest_step
 def execute_api_paper_workspace(
     state: dict,
     review_result: dict,
@@ -5426,7 +5296,7 @@ def resume_agent_workspace(
 ) -> bool:
     """Validate the combined output and route it through existing stage gates."""
     workspace = state.get("agent_workspace") or {}
-    if (state.get("status") not in {"prepared", "agent_required"}
+    if (state.get("status") not in {"prepared", "agent_required", "bibliographic_review_required"}
             or workspace.get("protocol_version") != AGENT_WORKSPACE_PROTOCOL):
         return False
     paper_md = REPO / state["extract_dir"] / "paper.md"
@@ -5830,6 +5700,7 @@ def build_agent_validation_receipt(state: dict, graph_preflight=None) -> dict:
     }
 
 
+@ic.timed_ingest_step
 def run_agent_graph_preflight(state: dict) -> tuple[list[str], dict]:
     """Compile and simulate the staged page through the sole Graph writer."""
     transaction_id = str(state.get("transaction_id") or "")
@@ -6086,6 +5957,7 @@ Miguel Frías-Pérez | 所属 | Max-Planck-Institut für Quantenoptik
 # parse_delimited → ic.parse_delimited (shared)
 
 
+@ic.timed_ingest_step
 def step_write_wiki(state: dict) -> tuple[bool, str]:
     """3.3 第一阶段：生成 paper-id + 骨架并物化 workspace Wiki。
 
@@ -6149,31 +6021,8 @@ def step_write_wiki(state: dict) -> tuple[bool, str]:
             skeleton_bundle=(skeleton_path, skeleton, ""),
         )
         if not workspace_ok:
-            failed_workspace = state.get("agent_workspace") or {}
-            state["api_workspace_fallback"] = {
-                "status": "segmented_api_fallback",
-                "reason": str(workspace_message or "combined workspace failed")[:500],
-                "worker": failed_workspace.get("api_worker", {}),
-            }
-            (extract_dir / "agent-workspace.txt").unlink(missing_ok=True)
-            for key in (
-                "agent_workspace", "agent_required", "agent_prompt", "agent_write_to",
-                "retryable", "next_action", "wiki_content", "slots_content",
-            ):
-                state.pop(key, None)
-            state["status"] = "write_wiki"
-            state["errors"] = []
-            state["bibliographic_review"] = {
-                "status": review_result.get("status", "prepared"),
-                "review": review_result.get("review", {}),
-                "decision": review_result.get("decision"),
-                "candidates": review_result.get("candidates", {}),
-                "catalog": review_result.get("catalog", {}),
-                "input_hash": review_result.get("input_hash", ""),
-                "worker": review_result.get("worker", {}),
-            }
-        else:
-            resumed_agent_output = True
+            return False, workspace_message
+        resumed_agent_output = True
     is_agent = ingest_mode() == "agent" or resumed_agent_output
     if resumed_agent_output:
         if not agent_output.is_file():
@@ -6266,7 +6115,13 @@ def step_write_wiki(state: dict) -> tuple[bool, str]:
     wiki_content = re.sub(
         r'(sources:\s*\n\s*-\s*)(?:path:\s*)?"?[^\n]+"?',
         f'\\1"{correct_source}"', wiki_content, count=1)
-    wiki_content = wl.normalize_raw_footnotes(wiki_content, reuse_inline=True)
+    supplied_locators = ()
+    if ingest_mode() == "api":
+        context = _api_paper_context(md_text, paper_md, correct_source, {})
+        supplied_locators = tuple(re.findall(r"^<([^>\n]+#L\d+)>[ \t]", context, re.M))
+    wiki_content = wl.normalize_raw_footnotes(
+        wiki_content, reuse_inline=True, supplied_locators=supplied_locators,
+    )
     (extract_dir / "wiki.md").write_text(wiki_content, encoding="utf-8")
     state["wiki_content"] = wiki_content
     # agent 模式：合并任务已同时产出语义槽，提前存入 state 供第二阶段跳过
@@ -6282,6 +6137,7 @@ def step_write_wiki(state: dict) -> tuple[bool, str]:
     return True, ""
 
 
+@ic.timed_ingest_step
 def step_write_slots(state: dict) -> tuple[bool, str]:
     """3.3 第二阶段：物化 workspace slots，必要时只定向重抽语义槽。
 
@@ -6459,10 +6315,8 @@ def _api_wiki_patch_catalog(wiki: str, errors: list[str]) -> dict:
                 raise ValueError(f"无法局部定位 Wiki 错误: {error}")
             start, end = sections[title] + 1, section_end(sections[title])
             if "含明确占位陈述" in error:
-                matching = [index for index in range(start, end) if (
-                    wl.PLACEHOLDER_CLAIM_RE.search(lines[index])
-                    or wl.PLACEHOLDER_TOKEN_RE.fullmatch(re.sub(
-                        r"[\s`*_>#\[\](){}:;,.!?，。；：！？、\-]+", "", wl.FOOTNOTE_REF_RE.sub("", lines[index]))))]
+                matching = [start + number - 1 for number in wl.placeholder_claim_line_numbers(
+                    "".join(lines[start:end]))]
                 spans = [(index, index + 1) for index in matching]
                 if not spans:
                     raise ValueError("占位陈述无法精确定位，需宿主修复")
@@ -6512,6 +6366,7 @@ def _apply_api_wiki_patch(wiki: str, decision: dict, catalog: dict,
         raise ValueError("Wiki patch 必须且只能覆盖已有 target ID")
     replacements = {}
     facts_changed = False
+    body_references = set()
     for patch in patches:
         target = by_id[patch["target_id"]]
         replacement = patch["replacement_text"]
@@ -6533,6 +6388,7 @@ def _apply_api_wiki_patch(wiki: str, decision: dict, catalog: dict,
             elif re.match(r"^#{1,2}[ \t]+|^---\s*$|^\[\^.*\]:", line):
                 raise ValueError("Wiki 正文补丁不得改动章节边界、frontmatter 或脚注定义")
         if target["scope"] == "body":
+            body_references.update(wl.FOOTNOTE_REF_RE.findall(replacement))
             if re.search(r"(?:RAW|[A-Za-z0-9_/.-]+\.md)#L\d+", replacement):
                 raise ValueError("Wiki 正文补丁只能引用脚注，不得插入 Raw 地址")
             original_headings = re.findall(r"^#{3,6}[ \t]+.*$", target["current_text"], re.M)
@@ -6543,6 +6399,8 @@ def _apply_api_wiki_patch(wiki: str, decision: dict, catalog: dict,
     result = wiki
     for target in reversed(catalog["targets"]):
         result = result[:target["start"]] + replacements[target["target_id"]] + result[target["end"]:]
+    if body_references - set(wl.parse_wiki_text(result)[1]):
+        raise ValueError("Wiki 正文补丁不得使用未定义脚注")
     return result, facts_changed
 
 
@@ -6651,6 +6509,7 @@ def _sync_api_workspace_content(state: dict) -> None:
 
 # parse_check_errors → ic.parse_check_errors (shared)
 
+@ic.timed_ingest_step
 def step_validate_wiki(state: dict) -> list[str]:
     """运行 ingest_check.py（结构校验，无 --graph），返回 ERROR 列表。"""
     extract_dir = REPO / state["extract_dir"]
@@ -6733,27 +6592,12 @@ def normalize_slots(text: str) -> str:
         if re.match(r"^.+[:：]\s*$", stripped) and "|" not in stripped:
             current_section = stripped.rstrip(":：").strip()
         if "|" in stripped:
-            if (current_section == "概念说明"
-                    and stripped.startswith("|") and stripped.endswith("|")):
-                table_cells = [cell.strip() for cell in stripped.strip("|").split("|")]
-                if table_cells and all(re.fullmatch(r":?-{3,}:?", cell) for cell in table_cells):
-                    continue
-                if (len(table_cells) == 2
-                        and table_cells[0].casefold() in {"概念", "概念名", "concept", "keyword"}
-                        and table_cells[1].casefold() in {"说明", "描述", "局部说明", "gloss"}):
-                    continue
-                if len(table_cells) == 2 and all(table_cells):
-                    stripped = " | ".join(table_cells)
             parts = [part.strip() for part in stripped.split("|")]
             if len(parts) == 3 and current_section != "概念说明":
                 normalized_predicate = normalize_predicate(parts[1], DEFAULT_CONFIG)
                 if normalized_predicate != parts[1]:
                     parts[1] = normalized_predicate
                     stripped = " | ".join(parts)
-                if parts[0] == "本论文" and parts[1] in PAPER_DIRECTION_PREDICATES:
-                    # graph_ingest derives paper navigation from the cited Wiki
-                    # direction sentence and deliberately ignores these label edges.
-                    continue
                 # 命题中的标点属于论断正文，不能把一条 proposition 拆成残句。
                 obj_parts = (
                     [parts[2]] if parts[1] in PROPOSITION_PREDICATES
@@ -6795,6 +6639,7 @@ def is_clearly_descriptive(obj: str) -> bool:
     return graph_ingest.is_descriptive_phrase(obj)
 
 
+@ic.timed_ingest_step
 def step_validate_semantics(state: dict) -> tuple[list[str], list[dict]]:
     """校验语义槽合法性。返回 (hard_errors, slot_warnings)。
 
@@ -6822,10 +6667,6 @@ def step_validate_semantics(state: dict) -> tuple[list[str], list[dict]]:
             import graph_lib as gl
             from graph_ingest import bare_tokens_resolvable as _btr
             conn = gl.connect()
-            # A new teacher library has no graph tables yet. Abbreviation
-            # resolution runs before graph_ingest, so initialize the empty
-            # database here before building its name index.
-            gl.init_schema(conn)
             ti, ai, si = gl.build_name_index(conn)
             resolve_ctx = (_btr, conn, ti, ai, si)
         return resolve_ctx
@@ -6982,9 +6823,6 @@ def step_validate_semantics(state: dict) -> tuple[list[str], list[dict]]:
                     })
     except Exception as exc:
         hard_errors.append(f"语义槽解析失败: {exc}")
-    finally:
-        if resolve_ctx is not None:
-            resolve_ctx[1].close()
     state["predicate_candidates"] = candidates
     blocking = [warning for warning in slot_warnings if ic.is_blocking_warning(warning, NON_BLOCKING_ISSUES)]
     _record_api_validation(state, "semantics", hard_errors + blocking, slot_warnings)
@@ -7276,6 +7114,7 @@ FINALIZE_TAIL_CONFIG = {
     "frontier_capture": True,
     "frontier_capture_limit": 3,
     "frontier_answer": True,
+    "frontier_answer_workers": 3,
     "fingerprint_artifact": _fingerprint_artifact,
     "build_log_entry": lambda ctx: (
         "\n## [" + ctx["today"] + "] ingest | ingest_paper.py 摄入 " + ctx["doc_id"] + "\n"
@@ -7478,7 +7317,7 @@ def run_prepare(state: dict) -> dict:
     if refresh_agent_workspace_handoff(state):
         inbox_state.save(state["transaction_id"], state)
         return state
-    if (state["status"] in {"prepared", "agent_required"}
+    if (state["status"] in {"prepared", "agent_required", "bibliographic_review_required"}
             and (state.get("agent_workspace") or {}).get("protocol_version") == AGENT_WORKSPACE_PROTOCOL
             and (state.get("agent_workspace") or {}).get("status") == "awaiting_output"):
         workspace_backend = str(
@@ -8134,6 +7973,7 @@ def _check_agent_workspace_once(state: dict) -> dict:
     }
 
 
+@ic.timed_ingest_step
 def check_agent_workspace(state: dict) -> dict:
     """Run the dry-run checks without changing hash-bound input artifacts."""
     extract_dir = REPO / str(state.get("extract_dir") or "")
@@ -8192,23 +8032,7 @@ def main() -> None:
                 }, ensure_ascii=False, indent=2))
                 return
             raise SystemExit(f"ERROR: 事务不存在: {resume_id}")
-        if args.agent_commit:
-            validation = check_agent_workspace(state)
-            if validation.get("status") != "ready_to_commit":
-                print(json.dumps(validation, ensure_ascii=False, indent=2))
-                return
-            if not resume_agent_workspace(state):
-                print(json.dumps(inbox_state.output_payload(state, {
-                    "status": "awaiting_agent",
-                    "workflow_status": "awaiting_agent",
-                    "internal_status": state.get("status", ""),
-                    "transaction_id": resume_id,
-                    "errors": state.get("errors", ["Agent workspace 无法恢复"]),
-                    "versions": _agent_versions(),
-                }), ensure_ascii=False, indent=2))
-                return
-        else:
-            resume_after_semantic_fix(state)
+        resume_after_semantic_fix(state)
     elif args.agent_workspace:
         state = inbox_state.load(args.agent_workspace)
         if not state:
@@ -8446,7 +8270,6 @@ def print_result(state: dict) -> None:
             "status": "agent_required",
             "execution_backend": backend,
             "message": message,
-            "errors": list(state.get("errors") or []),
             "prompt": state.get("agent_prompt", ""),
             "write_to": (state.get("agent_write_to", "") or review_path
                          or relationship_path or state.get("semantic_path", "")),

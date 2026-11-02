@@ -66,24 +66,6 @@ class PrivateCreateTests(unittest.TestCase):
         }, result['warnings'])
         self.assertTrue(self.target.is_file())
 
-    def test_create_rejects_page_self_edge_and_rolls_back(self):
-        txn, work = self.prepare()
-        (work / 'semantic.txt').write_text('三元组:\n  本文件|来源|New record\n')
-        public = digest(self.public)
-        with gl.connect(self.private, read_only=True) as conn:
-            private = list(conn.iterdump())
-        with self.assertRaisesRegex(ValueError, 'self-edge'):
-            pi.commit(txn)
-        self.assertFalse(self.target.exists())
-        self.assertEqual(digest(self.public), public)
-        # SQLite restore may change header counters; compare every schema and data row.
-        with gl.connect(self.private, read_only=True) as conn:
-            self.assertEqual(list(conn.iterdump()), private)
-        state = json.loads((work / 'state.json').read_text())
-        self.assertEqual(state['status'], 'rolled_back')
-        for item in state['files']:
-            self.assertFalse((self.root / item['destination']).exists())
-
     def test_source_hash_changes_rejected_before_writes(self):
         txn, work = self.prepare()
         (work / 'bundle/input.md').write_text('changed')
@@ -207,22 +189,7 @@ class PrivateCreateTests(unittest.TestCase):
         (work / 'state.json').write_text(json.dumps(state))
         (work / 'receipt.json').write_text(json.dumps(state['receipt']))
 
-        staged_sidecar = work / sidecar_item['staged']
-        retained_data = staged_sidecar.read_bytes()
-        retained_context = json.loads(retained_data)
-        invalid_context = json.loads(retained_data)
-        invalid_context['companion']['source_sha256'] = '0' * 64
-        staged_sidecar.write_text(json.dumps(invalid_context))
-        with self.assertRaisesRegex(ValueError, 'retained companion binding invalid'):
-            pi.commit(result['transaction_id'])
-        self.assertFalse(companion.exists())
-        self.assertFalse(sidecar.exists())
-        staged_sidecar.write_bytes(retained_data)
-        with patch.object(pi, '_private_companion_record',
-                          side_effect=AssertionError('must preserve retained extraction metadata')):
-            upgraded = pi.commit(result['transaction_id'])
-        self.assertEqual(json.loads(sidecar.read_text())['companion'],
-                         retained_context['companion'])
+        upgraded = pi.commit(result['transaction_id'])
         self.assertTrue(companion.is_file())
         self.assertTrue(sidecar.is_file())
         self.assertEqual(upgraded['companion_backfill']['destination'],

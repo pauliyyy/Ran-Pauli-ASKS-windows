@@ -391,39 +391,6 @@ def _graph_validation(target: Path) -> tuple[list[str], list[str]]:
     return errors, warnings
 
 
-def _reject_page_self_edges(workspace: Path, state: dict) -> None:
-    """Reject private self-reference before graph type filtering can drop it."""
-    page = state["page"]
-    fm = gl.read_frontmatter(workspace / "candidate.md")
-    triples = gi.parse_semantic_text(
-        (workspace / "semantic.txt").read_text(encoding="utf-8"), page, fm
-    )[0]
-    triples = gi.normalize_page_subjects(triples, page, fm)
-    explicit_names = {page, page + ".md", "本文件", "本文档"}
-    page_names = {str(fm.get("title") or "").strip(),
-                  *gl.parse_list_field(fm, "aliases")} - {""}
-    conn = gl.connect(gl.REPO / "private" / "graph.db", read_only=True)
-    try:
-        indexes = gl.build_name_index(conn)
-        def is_own_page(endpoint):
-            name = str(endpoint or "").strip()
-            if name in explicit_names:
-                return True
-            if name not in page_names:
-                return False
-            # A shared display name is not a unique assertion of page identity.
-            # Leave collisions for the existing type/ambiguity-aware compiler.
-            matches = {path for index in indexes for path in index.get(name, [])}
-            if gl.node_exists(conn, name):
-                matches.add(name)
-            return not (matches - {page})
-        for triple in triples:
-            if is_own_page(triple.get("subject")) and is_own_page(triple.get("object")):
-                raise ValueError("private page semantic input has a self-edge")
-    finally:
-        conn.close()
-
-
 def commit(transaction_id: str) -> dict:
     workspace, state = _find_transaction(transaction_id)
     if state.get("status") != "ready_to_commit":
@@ -480,7 +447,6 @@ def commit(transaction_id: str) -> dict:
                 knowledge_ir_out=None, graph_plan_out=None, page_file=None,
                 raw_source_override=None, raw_relationship_json=None,
             )
-            _reject_page_self_edges(workspace, state)
             with redirect_stdout(io.StringIO()):
                 gi._cmd_ingest_locked(args)
             errors, warnings = _graph_validation(target)

@@ -30,32 +30,26 @@ def test_extract_last_json_ignores_domain_status():
     assert parsed["paper_id"] == "p1"
 
 
-def test_pptx_preview_uses_native_extractor_without_pandoc():
-    from pptx import Presentation
-    from pptx.util import Inches
-
-    sentinel = "PPTX native preview sentinel"
-    with tempfile.TemporaryDirectory() as directory:
-        source = Path(directory) / "preview.pptx"
-        presentation = Presentation()
-        slide = presentation.slides.add_slide(presentation.slide_layouts[6])
-        box = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(8), Inches(1))
-        box.text_frame.text = sentinel
-        presentation.save(source)
-
-        with patch.object(
-            module.subprocess,
-            "run",
-            side_effect=AssertionError("PPTX preview must not invoke pandoc"),
-        ):
-            preview = module.read_document_preview(source)
-            bounded = module.read_document_preview(source, max_chars=24)
-        assert sentinel in preview
-        assert bounded == preview[:24]
-
-        corrupt = Path(directory) / "corrupt.pptx"
-        corrupt.write_text("not a presentation", encoding="utf-8")
-        assert module.read_document_preview(corrupt) == ""
+def test_result_entry_preserves_top_level_agent_task():
+    task = module.agent_task.make_task(
+        kind="ingest_paper", transaction_id="task-forwarding",
+        inputs=[{"name": "paper", "path": "temp/paper.md"}],
+        outputs=[{"name": "workspace", "path": "temp/workspace.txt"}],
+        protocol={"name": "paper-agent-workspace-v1"},
+        commands={"check": "python3 .scripts/wg.py task check task-forwarding"},
+    )
+    entry = module._result_entry("paper.pdf", "paper", task)
+    assert entry["status"] == "prepared"
+    assert entry["agent_task"] == task
+    nested = module._result_entry("paper.pdf", "paper", {
+        "status": "prepared", "transaction_id": "task-forwarding", "agent_task": task,
+    })
+    assert nested["agent_task"] == task
+    report = {"files": [entry], "total": 1, "backend": "agent", "maintenance": {},
+              **module._report_counts([entry])}
+    compact = module._compact_summary(report, module.REPO / "cross-domain/ingest-reports/test-task.json")
+    assert compact["files"][0]["agent_task"] == task
+    assert compact["items"][0]["agent_task"] == task
 
 
 def test_managed_external_file_staging_and_inbox_boundary():
@@ -1063,30 +1057,6 @@ def test_result_entry_names_api_host_recovery_not_legacy_handoff():
         assert entry["transaction_id"] == "txn-api-repair"
         assert entry["next_action"] == "repair_api_workspace_then_resume"
         assert not entry["ok"]
-
-
-def test_result_entry_preserves_specific_api_workspace_error():
-    parsed = {
-        "status": "agent_required",
-        "execution_backend": "api",
-        "errors": ["LLM 输出缺少 <<<WIKI>>> 段"],
-    }
-    entry = module._result_entry("paper.pdf", "paper", parsed)
-    assert entry["reason"] == "LLM 输出缺少 <<<WIKI>>> 段"
-
-
-def test_result_entry_prefers_failed_state_error_over_wrapper_output():
-    parsed = {
-        "status": "failed",
-        "errors": ["HTTP 404 Not Found: Invalid model GLM-5"],
-    }
-    entry = module._result_entry(
-        "paper.pdf",
-        "paper",
-        parsed,
-        "[ERROR category=unknown script=ingest_paper.py code=1]",
-    )
-    assert entry["reason"] == "HTTP 404 Not Found: Invalid model GLM-5"
 
 
 def test_auto_resolve_abbr_key_contract():
@@ -2116,9 +2086,42 @@ def test_maintenance_publication_recounts_current_quality():
                 assert json.loads(report_path.read_text(encoding="utf-8")) == persisted
 
 
+def test_maintenance_recovers_quality_omitted_from_legacy_completed_output():
+    import inbox_state
+
+    for backend in ("agent", "api"):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            with patch.object(module, "REPO", root), patch.object(inbox_state, "REPO", root):
+                warning = {"issue": "meeting_entity_unresolved", "mention": "unknown person"}
+                state = {"status": "completed", "transaction_id": "legacy-meeting",
+                         "wiki_path": "academic/wiki/conferences/legacy",
+                         "quality_status": "degraded", "quality_warnings": [warning]}
+                inbox_state.save(state["transaction_id"], state)
+                maintenance = {"status": "completed", "actions": [], "errors": [],
+                               "receipt_path": "temp/inbox-maintenance/quality.json",
+                               "components": {"abbreviations": {
+                                   "status": "completed", "remaining_occurrences": 0}}}
+                module._write_json_atomic(root / maintenance["receipt_path"], maintenance)
+                report = {"total": 1, "backend": backend, "maintenance": maintenance,
+                          "files": [{"file": "legacy.txt", "status": "completed", "ok": True,
+                                     "transaction_id": state["transaction_id"],
+                                     "wiki_path": state["wiki_path"]}]}
+                report_path = root / "cross-domain/ingest-reports/legacy.json"
+                report.update(module._report_counts(report["files"]))
+                assert module.publish_maintenance_report(report_path, report)
+                persisted = json.loads(report_path.read_text())
+                assert persisted["degraded"] == 1
+                assert persisted["files"][0]["quality_warnings"] == [warning]
+                compact = module._compact_summary(persisted, report_path)
+                assert compact["files"][0]["quality_warning_count"] == 1
+                assert compact["files"][0]["quality_warning_history_count"] == 1
+
+
 def main():
+    test_maintenance_recovers_quality_omitted_from_legacy_completed_output()
+    test_result_entry_preserves_top_level_agent_task()
     test_extract_last_json_ignores_domain_status()
-    test_pptx_preview_uses_native_extractor_without_pandoc()
     test_managed_external_file_staging_and_inbox_boundary()
     test_managed_external_file_rejects_symlink_target()
     test_document_dispatch_marks_inbox_entrypoint()
@@ -2149,9 +2152,6 @@ def main():
     test_map_paper_batch_preserves_identity_in_every_state()
     test_map_paper_batch_results()
     test_map_paper_batch_preserves_bibliographic_review_contract()
-    test_result_entry_names_api_host_recovery_not_legacy_handoff()
-    test_result_entry_preserves_specific_api_workspace_error()
-    test_result_entry_prefers_failed_state_error_over_wrapper_output()
     test_auto_resolve_abbr_key_contract()
     test_compact_summary_excludes_graph_diagnostics_and_returns_report_path()
     test_auto_create_hubs_writes_split_handoff()

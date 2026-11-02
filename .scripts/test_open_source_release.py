@@ -2,7 +2,6 @@
 """Regression checks for manifest-governed public release construction."""
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,7 +15,6 @@ import open_source_release as release
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / ".scripts/open_source_release.py"
-PUBLIC_RESEARCH_TEMPLATE_FILES = {'projects/_templates/research/schema.yaml', 'projects/_templates/research/codes/README.md', 'projects/_templates/research/AGENTS.md', 'projects/_templates/research/codes/analysis/README.md', 'projects/_templates/research/notes/status.md', 'projects/_templates/research/outputs/.gitkeep', 'projects/_templates/research/README.md', 'projects/_templates/research/codes/tests/README.md', 'projects/_templates/research/codes/docs/PHYSICS.md', 'projects/_templates/research/codes/docs/README.md', 'projects/_templates/research/codes/experiments/README.md'}
 
 
 def run(*args: str, expected: int = 0) -> subprocess.CompletedProcess:
@@ -229,55 +227,6 @@ def check_private_release_boundary() -> None:
                 assert sorted(p.name for p in destination.iterdir()) == ['keep.txt']
 
 
-
-def check_public_research_template_boundary() -> None:
-    """Only the eleven declared generic files may enter a public source snapshot."""
-    manifest = release.load_manifest()
-    patterns = [path for path in manifest["include"] if path.startswith("projects/")]
-    assert set(patterns) == PUBLIC_RESEARCH_TEMPLATE_FILES
-    with tempfile.TemporaryDirectory() as temporary:
-        root = Path(temporary) / "source"
-        destination = Path(temporary) / "release"
-        root.mkdir(); destination.mkdir()
-        for relative in PUBLIC_RESEARCH_TEMPLATE_FILES:
-            target = root / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(REPO / relative, target)
-        sentinels = [
-            "projects/teacher-instance/notes/status.md",
-            "projects/_templates/research/.env",
-            "projects/_templates/research/.workspace/items/runtime.md",
-            "projects/_templates/research/outputs/generated.json",
-            "projects/_templates/research/notes/extra-personal.md",
-            "private/synthetic.md", "academic/raw/source/paper.md", ".env",
-        ]
-        for relative in sentinels:
-            target = root / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text("SYNTHETIC NONPUBLIC TEST INPUT", encoding="utf-8")
-        with patch.object(release, "REPO", root):
-            selected = release.selected_files({"include": patterns, "exclude": []})
-        assert selected == PUBLIC_RESEARCH_TEMPLATE_FILES
-        assert not selected.intersection(sentinels)
-        # Even existing/optional private project nodes stay outside the projected graph.
-        import yaml
-        graph = root / release.PUBLIC_GRAPH_PATH
-        graph.parent.mkdir(parents=True, exist_ok=True)
-        nodes = {
-            "generic_template": {"path": "projects/_templates/research/schema.yaml", "kind": "template"},
-            "active_project": {"path": "projects/teacher-instance/notes/status.md", "optional": True},
-            "lookalike_template": {"path": "projects/_templates/research-other/schema.yaml", "optional": True},
-            "private_metadata": {"path": ".project/META.md", "optional": True},
-        }
-        graph.write_text(yaml.safe_dump({"nodes": nodes, "edges": []}), encoding="utf-8")
-        template = destination / "projects/_templates/research/schema.yaml"
-        template.parent.mkdir(parents=True)
-        template.write_text("generic: true\n", encoding="utf-8")
-        with patch.object(release, "REPO", root):
-            projected = release.projected_engineering_graph(destination)
-        assert set(projected["nodes"]) == {"generic_template"}
-
-
 def check_pdf_render_health() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
@@ -314,7 +263,6 @@ def check_pdf_render_health() -> None:
 
 def main() -> None:
     check_private_release_boundary()
-    check_public_research_template_boundary()
     check_documentation_omissions()
     check_version_preparation()
     check_version_progression()
@@ -351,34 +299,7 @@ def main() -> None:
             "SKILL.md", "agents/openai.yaml", "scripts/diagnosis_preflight.py",
             "scripts/test_diagnosis_preflight.py",
         }
-        published_projects = {
-            path.relative_to(destination).as_posix()
-            for path in (destination / "projects").rglob("*") if path.is_file()
-        }
-        assert published_projects == PUBLIC_RESEARCH_TEMPLATE_FILES
-        assert (destination / ".scripts/fixtures/public-playbook-index.md").is_file()
-        tracked_template = subprocess.run(
-            ["git", "ls-files", "--others", "--exclude-standard", "--", "projects/_templates/research"],
-            cwd=destination, text=True, capture_output=True, check=True,
-        )
-        assert set(tracked_template.stdout.splitlines()) == PUBLIC_RESEARCH_TEMPLATE_FILES
-        # Test the generated distribution's original CLI against a disposable project root.
-        with tempfile.TemporaryDirectory() as project_directory:
-            project_root = Path(project_directory)
-            shutil.copytree(destination / "projects/_templates/research",
-                            project_root / "_templates/research")
-            environment = os.environ.copy()
-            environment["WIKIGRAPH_PROJECTS_DIR"] = str(project_root)
-            for command in [
-                ["init", "export-smoke", "--name", "Synthetic export smoke", "--topic", "Portable template"],
-                ["validate", "export-smoke", "--strict"],
-            ]:
-                initialized = subprocess.run(
-                    [sys.executable, ".scripts/research_project.py", *command],
-                    cwd=destination, env=environment, text=True, capture_output=True,
-                )
-                assert initialized.returncode == 0, initialized.stdout + initialized.stderr
-            assert (project_root / "export-smoke/workspace.yaml").is_file()
+        assert not (destination / "projects").exists()
         private_ignored = subprocess.run(
             ["git", "check-ignore", "projects/local-input/manuscript.pdf"],
             cwd=destination, text=True, capture_output=True,
@@ -591,8 +512,6 @@ def main() -> None:
         assert "e1_experiment_workspace:" not in graph_text
         assert "e1_experiment_plan:" not in graph_text
         assert "e1_analysis:" not in graph_text
-        assert "research_project_template:" in graph_text
-        assert "path: projects/_templates/research/schema.yaml" in graph_text
         assert "path: projects/ASKS" not in graph_text
         assert "path: projects/ForBetterScience" not in graph_text
         graph_check = subprocess.run(

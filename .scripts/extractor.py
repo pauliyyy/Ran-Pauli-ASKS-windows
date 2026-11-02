@@ -65,7 +65,6 @@ BLSC_OCR_PROMPT = (
 DOCLING_VENV = Path(__file__).resolve().parent.parent / ".venv-docling"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = PROJECT_ROOT / ".project" / "config.yaml"
-ROOT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 # 论文提取产物目录(学术域内,符合四域结构;原 CodexInspiration 用 raw/papers/)
 PAPERS_DIR = PROJECT_ROOT / "academic" / "raw" / "works" / "papers"
 MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\((?:<)?([^\s)>]+)")
@@ -279,11 +278,10 @@ def can_override(current_engine: Optional[str], new_engine: str) -> bool:
 # 在 source.yaml / meta.yaml 记录来源路径，供后续复用与溯源。
 
 def load_config() -> dict:
-    """加载配置；实例级 .project/config.yaml 优先，根 config.yaml 为标准回退。"""
-    for config_path in (CONFIG_PATH, ROOT_CONFIG_PATH):
-        if config_path.exists():
-            with open(config_path, "r", encoding="utf-8") as f:
-                return yaml.safe_load(f) or {}
+    """加载 config.yaml（不存在返回空 dict）。"""
+    if CONFIG_PATH.exists():
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
     return {}
 
 
@@ -413,7 +411,10 @@ def extract_mineru(paper_dir: Path, paper_id: str, *, failure: Optional[dict] = 
             logger.info(f"  📦 MinerU: 发现 {mineru_path.name} ({len(content):,} 字节)")
             return ExtractionContent(content=content, metadata={"source": "manual"})
 
-    config = load_config()
+    config = {}
+    if CONFIG_PATH.exists():
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
     mineru_config = (config.get("extraction") or {}).get("mineru") or {}
     if mineru_config.get("enabled", True) is False:
         logger.info("  MinerU API: 已禁用")
@@ -505,11 +506,7 @@ def extract_paddleocr(paper_dir: Path, paper_id: str) -> Optional[ExtractionCont
 
 def _blsc_ocr_config() -> dict:
     """读取 extraction.blsc_ocr 配置。"""
-    config = dict((load_config().get("extraction") or {}).get("blsc_ocr") or {})
-    enabled_override = os.getenv("BLSC_OCR_ENABLED", "").strip().lower()
-    if enabled_override:
-        config["enabled"] = enabled_override not in {"0", "false", "no", "off"}
-    return config
+    return (load_config().get("extraction") or {}).get("blsc_ocr") or {}
 
 
 def _render_pdf_pages(pdf_path: Path, dpi: int) -> Optional[list]:
@@ -537,34 +534,7 @@ def _render_pdf_pages(pdf_path: Path, dpi: int) -> Optional[list]:
         document.close()
 
 
-def _blsc_api_settings(config: dict) -> dict[str, str]:
-    """Resolve the PDF OCR endpoint with process environment precedence."""
-    base_env = str(config.get("base_env") or "LLM_API_BASE")
-    path_env = str(config.get("path_env") or "LLM_API_PATH")
-    key_env = str(config.get("key_env") or "LLM_API_KEY")
-    model_env = str(config.get("model_env") or "LLM_MODEL")
-    base = (os.getenv("BLSC_OCR_API_BASE", "").strip()
-            or os.getenv(base_env, "").strip())
-    path = (os.getenv("BLSC_OCR_API_PATH", "").strip()
-            or os.getenv(path_env, "").strip()
-            or str(config.get("api_path") or "/v1/chat/completions").strip())
-    key = (os.getenv("BLSC_OCR_API_KEY", "").strip()
-           or os.getenv(key_env, "").strip())
-    model = (os.getenv("BLSC_OCR_MODEL", "").strip()
-             or os.getenv(model_env, "").strip()
-             or str(config.get("model") or "GLM-4.6V").strip())
-    fallback_model = (os.getenv("BLSC_OCR_FALLBACK_MODEL", "").strip()
-                      or str(config.get("fallback_model") or "GLM-4.5V").strip())
-    endpoint = env_config.join_api_url(base, path) if base else ""
-    return {
-        "endpoint": endpoint,
-        "key": key,
-        "model": model,
-        "fallback_model": fallback_model,
-    }
-
-
-def _call_blsc_chat(base_url: str, key: str, model: str, messages: list, timeout_sec: int, *, api_path: str = "/v1/chat/completions") -> str:
+def _call_blsc_chat(base_url: str, key: str, model: str, messages: list, timeout_sec: int) -> str:
     """调用 BLSC OpenAI 兼容 chat.completions，返回纯文本内容。"""
     payload = json.dumps(
         {
@@ -576,7 +546,7 @@ def _call_blsc_chat(base_url: str, key: str, model: str, messages: list, timeout
         ensure_ascii=False,
     ).encode("utf-8")
     request = urllib.request.Request(
-        env_config.join_api_url(base_url, api_path) if api_path else base_url,
+        f"{base_url.rstrip('/')}/v1/chat/completions",
         data=payload,
         headers={
             "Authorization": f"Bearer {key}",
@@ -599,12 +569,11 @@ def extract_blsc_ocr(paper_dir: Path, paper_id: str) -> Optional[str]:
         logger.info("  BLSC OCR: 已禁用")
         return None
 
-    try:
-        api = _blsc_api_settings(config)
-    except ValueError as exc:
-        logger.warning("  ⚠️ BLSC OCR: API endpoint 配置无效 - %s", exc)
-        return None
-    if not api["endpoint"] or not api["key"] or not api["model"]:
+    base_url = os.getenv(config.get("base_env", "LLM_API_BASE"), "").strip()
+    key = os.getenv(config.get("key_env", "LLM_API_KEY"), "").strip()
+    model = config.get("model", "GLM-4.6V").strip()
+    fallback_model = config.get("fallback_model", "GLM-4.5V").strip()
+    if not base_url or not key or not model:
         logger.info("  BLSC OCR: 未配置 API base/key/model，跳过")
         return None
 
@@ -615,7 +584,6 @@ def extract_blsc_ocr(paper_dir: Path, paper_id: str) -> Optional[str]:
     dpi = int(config.get("dpi", 160))
     timeout_sec = int(config.get("request_timeout_sec", 180))
     max_pages = int(config.get("max_pages", 200))
-    page_attempts = max(1, min(int(config.get("page_attempts", 3)), 5))
     pages = _render_pdf_pages(pdf_path, dpi)
     if pages is None:
         return None
@@ -623,7 +591,7 @@ def extract_blsc_ocr(paper_dir: Path, paper_id: str) -> Optional[str]:
         logger.warning("  ⚠️ BLSC OCR: PDF 页数 %d 超过 max_pages=%d，跳过", len(pages), max_pages)
         return None
 
-    models = list(dict.fromkeys([api["model"], api["fallback_model"]]))
+    models = list(dict.fromkeys([model, fallback_model]))
     models = [item for item in models if item]
     logger.info("  📄 BLSC OCR: %d 页，模型 %s", len(pages), " / ".join(models))
 
@@ -639,27 +607,17 @@ def extract_blsc_ocr(paper_dir: Path, paper_id: str) -> Optional[str]:
         }]
         page_text = None
         for current_model in models:
-            for attempt in range(1, page_attempts + 1):
-                try:
-                    page_text = _call_blsc_chat(
-                        api["endpoint"], api["key"], current_model, messages, timeout_sec,
-                        api_path="",
-                    )
-                    if page_text:
-                        break
-                except (urllib.error.URLError, TimeoutError, RuntimeError, json.JSONDecodeError) as exc:
-                    logger.warning(
-                        "  ⚠️ BLSC OCR 第 %d 页 %s 失败 (第 %d/%d 次): %s",
-                        page_no,
-                        current_model,
-                        attempt,
-                        page_attempts,
-                        exc,
-                    )
-                    if attempt < page_attempts:
-                        time.sleep(min(2 ** (attempt - 1), 4))
-            if page_text:
-                break
+            try:
+                page_text = _call_blsc_chat(base_url, key, current_model, messages, timeout_sec)
+                if page_text:
+                    break
+            except (urllib.error.URLError, TimeoutError, RuntimeError, json.JSONDecodeError) as exc:
+                logger.warning(
+                    "  ⚠️ BLSC OCR 第 %d 页 %s 失败: %s",
+                    page_no,
+                    current_model,
+                    exc,
+                )
         if page_text is None:
             logger.warning("  ❌ BLSC OCR: 第 %d 页所有模型均失败，放弃本次提取", page_no)
             return None

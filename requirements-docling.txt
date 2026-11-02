@@ -1,3 +1,0 @@
-# Install this file only into the isolated .venv-docling environment.
-# On CPU-only Ubuntu, install PyTorch CPU wheels first; see operations/UBUNTU.md.
-docling

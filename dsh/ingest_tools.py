@@ -60,16 +60,15 @@ def _classify_error_text(text: str) -> str:
             "traceback", "nameerror", "brokenpipeerror",
             "ingest transition receipt mismatch", "illegal persisted ingest transition")):
         return "code_defect"
-    if any(p in text for p in ("extractor.py", "所有引擎均失败", "ocr 返回空内容",
-                               "extract failed", "extraction failed", "提取失败",
-                               "mineru failed", "ocr failed", "empty content",
-                               "no extracted text", "no text extracted", "scanned document")):
-        return "extraction_failed"
     if any(p in text for p in ("bibliographic", "书目", "预审", "semantic", "slot",
                                "wiki validation", "wiki 校验", "agent_required", "handoff")):
         return "semantic_failed"
     if any(p in text for p in ("graph", "sqlite", "edge", "keyword", "hub")):
         return "graph_failed"
+    if any(p in text for p in ("extract failed", "extraction failed", "提取失败",
+                               "mineru failed", "ocr failed", "empty content",
+                               "no extracted text", "no text extracted", "scanned document")):
+        return "extraction_failed"
     return "unknown"
 
 
