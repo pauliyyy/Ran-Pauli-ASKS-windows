@@ -166,8 +166,8 @@ def _fallback_trace_case(case: dict) -> tuple[str, dict]:
     try:
         llm_structured.load_env = lambda: {"QUERY_BACKEND": "api"}
         llm_structured.api_profiles = lambda _config, _operation: [
-            {"name": "weak", "base": "https://synthetic.invalid", "endpoint": "https://synthetic.invalid/v1/chat/completions", "key": "x", "model": models[0]},
-            {"name": "fallback", "base": "https://synthetic.invalid", "endpoint": "https://synthetic.invalid/v1/chat/completions", "key": "x", "model": models[1]},
+            {"name": "weak", "base": "https://synthetic.invalid", "key": "x", "model": models[0]},
+            {"name": "fallback", "base": "https://synthetic.invalid", "key": "x", "model": models[1]},
         ]
         llm_structured.urllib.request.urlopen = fake_urlopen
         llm_structured._log_event = lambda *_args, **_kwargs: None

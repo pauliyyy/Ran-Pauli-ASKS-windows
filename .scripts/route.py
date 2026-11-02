@@ -18,10 +18,10 @@ LLM 判断指令类型后,调本脚本截取对应规范 section,拼成 prompt�
   route.py --task build    # 建设:输出 WikiGraph 方法哲学与工程信息入口
   route.py --task research # 研究:输出 RESEARCH 规范
   route.py --task frontier # 研究前沿:输出 FRONTIER 规范
-  route.py --capability write --capability-profile academic # research 状态内按需加载论文落笔能力
-  route.py --capability cv --capability-profile general # workspace 状态内加载简历制作与维护契约
+  route.py --capability write --capability-profile academic # research 工作上下文内按需加载论文落笔能力
+  route.py --capability cv --capability-profile general # workspace 工作上下文内加载简历制作与维护契约
   route.py --capability presentation --capability-profile create # PPT 创作契约与当前可执行入口
-  route.py --list           # 分类列出工作状态、路由任务与按需能力
+  route.py --list           # 分类列出持续工作、路由任务与按需能力
 
 ingest 参数说明:
   --mode   create(默认)/update/batch
@@ -46,7 +46,6 @@ sys.path.insert(0, str(REPO / ".scripts"))
 import agent_task
 import engineering_locator as engineering_loc
 import function_registry as fr
-from route_rendering import render_routed_text
 from engineering_graph import capability as engineering_capability
 from engineering_graph import load as load_engineering_graph
 from engineering_graph import validate as validate_engineering_graph
@@ -59,8 +58,8 @@ QUERY_PROFILE_SECTIONS = {
 }
 
 QUERY_STAGE_SECTIONS = {
-    "start": ["会话级总计划", "轻量检索策略", "触发方式", "全局规则", "section 读取", "第零层", "第一层", "第二层", "首轮定位步骤"],
-    "evidence": ["最小证据与披露", "Evidence Profile", "证据下钻步骤"],
+    "start": ["会话级总计划", "轻量检索策略", "触发方式", "全局规则", "第零层", "第一层", "第二层", "首轮定位步骤"],
+    "evidence": ["最小证据与披露", "Evidence Profile", "section 读取", "证据下钻步骤"],
     "continue": ["回环规则", "回环计数", "槽位清单与缺口回检", "stop_reason", "续查与停止步骤"],
     "answer": ["三种表述姿态", "高层摘要定位约束", "交付步骤"],
 }
@@ -179,7 +178,7 @@ ROUTES = {
             },
             "update": {
                 "sections": ["会话级总计划", "摄入操作类型", "更新模式", "冲突处理分支", "通用 raw 路径约束",
-                             "节点类型", "描述性短语校验",
+                             "节点类型",
                              "graph.db 边格式", "通用来源标记", "重要约束",
                              "Raw 文档包节点与 Wiki 直连"],
                 "schema": ["页面类型", "Frontmatter 模板", "标准 section 结构",
@@ -242,9 +241,10 @@ ROUTES = {
     },
 }
 
-# 能力是工作状态内按需加载的规范包；它不创建或切换工作状态。
+# 能力是持续工作内按需加载的规范包；它不创建或切换持续工作。
 # 顶层 --task write 继续作为 general profile 的兼容入口。
 CAPABILITY_ROUTES = {
+    "review": {"general": [("operations/REVIEW.md", None)]},
     "illustration": {"general": [("operations/ILLUSTRATION.md", None)]},
     "science-exhibit": {
         "create": [("operations/SCIENCE_EXHIBIT.md", None)],
@@ -348,7 +348,7 @@ def split_misses(misses):
     return required, optional
 
 
-def emit_query_profile(query, profiles, stage, output_format, subproject="", topic="auto", verbatim=False):
+def emit_query_profile(query, profiles, stage, output_format, subproject="", topic="auto"):
     sections = list(QUERY_STAGE_SECTIONS[stage])
     private = subproject == "private"
     if not private and stage in {"start", "evidence"}:
@@ -387,8 +387,6 @@ def emit_query_profile(query, profiles, stage, output_format, subproject="", top
     if not private and agent_task.query_backend() == "api":
         from llm_structured import configured_model
         backend_notice = f"阶段 {stage}：LLM=API（{configured_model()}）；输出须遵守当前任务卡并经既有校验。"
-    if not verbatim:
-        text = render_routed_text(text, shared_query_source=True)
     result = {
         "task": "query", "profile": "+".join(profiles), "profiles": profiles, "stage": stage, "query": query,
         "query_scope": scope,
@@ -567,7 +565,7 @@ def emit_ingest_context_warmup(args, content, mode, backend, output_format):
 
 
 def emit_capability(name: str, profile: str) -> None:
-    """输出可在当前工作状态内组合的能力规范，不创建或切换状态。"""
+    """输出可在当前工作上下文内组合的能力规范，不创建或切换工作上下文。"""
     profiles = CAPABILITY_ROUTES.get(name)
     if profiles is None or profile not in profiles:
         available = sorted(profiles or {})
@@ -608,7 +606,7 @@ def main():
     ap = argparse.ArgumentParser(description="按 task 分发规范 prompt")
     ap.add_argument("--task", help="任务类型(ingest/query/lint/sync/write/scan/inbox/hub/build/research/frontier)")
     ap.add_argument("--capability", choices=sorted(CAPABILITY_ROUTES),
-                    help="在当前工作状态内按需加载的能力")
+                    help="在当前工作上下文内按需加载的能力")
     ap.add_argument("--capability-profile", default="general",
                     help="能力 profile（write: general/academic；science-exhibit: create/discuss/resume；presentation: create/form-check/evidence-check/citation-redact）")
     ap.add_argument("--subproject", help="ingest 目标域或 query 范围；private 使用隔离图及本地 Agent，不继承公共 API backend")
@@ -628,7 +626,6 @@ def main():
     ap.add_argument("--context-warmup", action="store_true",
                     help="仅 ingest：输出当前对话首次摄入使用的一次性紧凑预热回执")
     ap.add_argument("--full", action="store_true", help="query 任务输出完整规范(审阅/调试)")
-    ap.add_argument("--verbatim", action="store_true", help="query/ingest 当前路由输出未经压缩的原文（审阅/调试）")
     args = ap.parse_args()
 
     if args.context_warmup and args.task != "ingest":
@@ -682,7 +679,7 @@ def main():
         ap.error("unsupported query subproject")
     if args.task == "query" and (not args.full or args.subproject == "private"):
         profiles = classify_query(args.query) if args.profile == "auto" else [args.profile]
-        emit_query_profile(args.query, profiles, args.query_stage, args.format, args.subproject, args.query_topic, args.verbatim)
+        emit_query_profile(args.query, profiles, args.query_stage, args.format, args.subproject, args.query_topic)
         return
 
     # ===== ingest 特殊处理(stage 化) =====
@@ -791,9 +788,11 @@ def main():
                 for f, miss in optional:
                     print(f"WARN: 可选 section 未命中 {f} :: {miss}", file=sys.stderr)
 
-        # Presentation only: raw hits/locators remain unchanged for auditing.
-        routed_text = "".join(f"--- {label} ---\n{content_text}\n\n" for label, content_text in all_hits)
-        print(routed_text if args.verbatim else render_routed_text(routed_text), end="")
+        # 输出
+        for label, content_text in all_hits:
+            print(f"--- {label} ---")
+            print(content_text)
+            print()
 
         if all_misses:
             print("--- 未命中 section(可能已改名,请检查) ---", file=sys.stderr)

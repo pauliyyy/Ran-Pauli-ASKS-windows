@@ -1,0 +1,44 @@
+name: Linux edition gate
+
+on:
+  pull_request:
+    branches: [Ran-Pauli-ASKS-Linux]
+  push:
+    branches: [Ran-Pauli-ASKS-Linux]
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.28"
+          enable-cache: true
+      - name: Install local Office and font tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libreoffice-writer libreoffice-impress libreoffice-calc fontconfig fonts-noto-cjk poppler-utils
+      - name: Install frozen Python extras
+        run: uv sync --frozen --all-extras
+      - name: Diagnose Linux runtime
+        run: |
+          uv run ran-asks doctor --profile release
+          uv run ran-asks doctor --profile office
+          uv run ran-asks doctor --profile visual
+      - name: Run ordered release and Linux adapter regressions
+        run: uv run ran-asks test release
+      - name: Check real local rendering without model calls
+        run: |
+          uv run python .scripts/test_science_exhibit.py --render
+          uv run python .scripts/test_science_exhibit_workflow.py --render
+          uv run python .scripts/test_presentation_runtime.py --render
+          uv run python .scripts/test_presentation_state.py --render
+          uv run python .scripts/test_presentation_delivery.py --render

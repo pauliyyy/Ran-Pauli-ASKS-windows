@@ -319,15 +319,6 @@ def test_classify_error_categories():
     assert _classify_error(1, "something unexpected", "") == "unknown"
 
 
-def test_classify_error_treats_extractor_command_failure_as_extraction():
-    from dsh.ingest_tools import _classify_error
-    payload = json.dumps({
-        "status": "failed",
-        "errors": ["RuntimeError: command failed: .scripts/extractor.py --paper demo"],
-    })
-    assert _classify_error(1, "", payload) == "extraction_failed"
-
-
 def test_classify_error_prefers_structured_bibliographic_failure_over_pdf_name():
     from dsh.ingest_tools import _classify_error
     payload = json.dumps({

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-import re
+import io
+from contextlib import redirect_stdout
 from pathlib import Path
 import shutil
 import sys
@@ -22,15 +23,6 @@ import graph_ingest
 import llm_structured
 import repair_meeting_identity as meeting_repair
 from meeting_compiler_contract import PROTOCOL_VERSION
-
-
-def test_transaction_id_has_microseconds_and_random_suffix():
-    first = meeting.new_transaction_id("same meeting")
-    second = meeting.new_transaction_id("same meeting")
-    pattern = r"^\d{8}-\d{6}-\d{6}-same-meeting-[0-9a-f]{8}$"
-    assert re.fullmatch(pattern, first)
-    assert re.fullmatch(pattern, second)
-    assert first != second
 
 
 def _workspace() -> Path:
@@ -332,7 +324,14 @@ def test_agent_path_prepares_task_without_entering_api_adapter():
 
 def test_date_context_preserves_explicit_year_and_marks_mmdd_inference():
     assert meeting.extract_meeting_date("20250901-lab.txt") == "20250901"
+    assert meeting.extract_meeting_date("2025-09-01-lab.txt") == "20250901"
+    assert meeting.extract_meeting_date("2026-10-22-巴黎联合国教科文组织会议纪要.txt") == "20261022"
+    assert meeting.extract_meeting_date("2024-02-29_meeting.txt") == "20240229"
+    assert meeting.extract_meeting_date("0229-meeting.txt") == "0229"
+    for filename in ("2026-meeting.txt", "2026-02-29-meeting.txt", "20260229-meeting.txt", "1332-meeting.txt"):
+        assert meeting.extract_meeting_date(filename) == ""
     assert meeting.generate_meeting_id("20250901-lab.txt", "组会") == "0901-组会"
+    assert meeting.generate_meeting_id("2025-09-01-lab.txt", "组会") == "0901-组会"
     explicit = meeting.meeting_date_context("20250901", today="2026-09-04")
     assert explicit == {
         "date": "2025-09-01", "storage_year": "2025",
@@ -566,6 +565,8 @@ def test_prompt_requires_one_coherent_protocol():
     assert "person_updates" in prompt
     assert "已有学生研究记录目录" in prompt
     assert "避免重复叙述" in prompt
+    assert "不为双语格式猜测或补造全称" in prompt
+    assert "不把待确认身份写成同一人" in prompt
 
 
 def test_person_updates_are_projected_into_cited_meeting_navigation():
@@ -1025,12 +1026,66 @@ def test_body_source_rebinding_survives_title_change_in_both_backends():
             shutil.rmtree(work)
 
 
+def test_completed_meeting_output_preserves_current_and_historical_quality():
+    warning = {"issue": "meeting_entity_unresolved", "mention": "unknown person"}
+    state = {"status": "completed", "transaction_id": "quality-test",
+             "quality_status": "degraded", "quality_warnings": [warning],
+             "quality_warning_history": [warning]}
+    output = io.StringIO()
+    with patch.object(sys, "argv", ["ingest_meeting.py", "--resume", "quality-test", "--verbose"]), \
+            patch.object(meeting.inbox_state, "load", return_value=state), \
+            patch.object(meeting, "run_pipeline", return_value=state), \
+            patch.object(meeting.ic, "run_resume_post_maintenance", return_value=None), \
+            redirect_stdout(output):
+        meeting.main()
+    result = json.loads(output.getvalue())
+    assert result["quality_status"] == "degraded"
+    assert result["quality_warnings"] == [warning]
+    assert result["quality_warning_history"] == [warning]
+
+
+def test_meeting_term_acronyms_require_their_own_cited_source():
+    proposal = _proposal()
+    meeting_ir = proposal["meeting_ir"]
+    catalog = [{"evidence_id": "s0001", "text": "使用 tbd 讨论动力学。"},
+               {"evidence_id": "s0002", "text": "另一个独立议题 TTD。"}]
+    meeting_ir["topics"][0]["label"] = "TBD 动力学"
+    assert meeting.validate_meeting_ir(meeting_ir, {"s0001", "s0002"}, evidence_catalog=catalog) == []
+    catalog[0]["text"] = "使用 ｔｂｄ 讨论动力学。"
+    assert meeting.validate_meeting_ir(meeting_ir, {"s0001", "s0002"}, evidence_catalog=catalog) == []
+    meeting_ir["topics"][0]["label"] = "TBD 动力学 (Transfer tensor dynamics, TTD)"
+    errors = meeting.validate_meeting_ir(meeting_ir, {"s0001", "s0002"}, evidence_catalog=catalog)
+    assert len(errors) == 1 and "unsupported acronym 'TTD'" in errors[0]
+    meeting_ir["topics"][0]["evidence_ids"].append("s0002")
+    assert meeting.validate_meeting_ir(meeting_ir, {"s0001", "s0002"}, evidence_catalog=catalog) == []
+
+
+def test_unsupported_acronym_is_rejected_before_meeting_staging():
+    work = _workspace()
+    try:
+        state = _state(work)
+        proposal = _proposal()
+        proposal["meeting_ir"]["topics"][0]["label"] = "知识库 (Invented project, XYZ)"
+        result = SimpleNamespace(status="compiled", reason="proposal_ready", proposal=proposal,
+                                 trace=lambda: {"status": "compiled"})
+        with patch.object(meeting, "ingest_mode", return_value="api"), \
+                patch.object(meeting, "run_api_meeting_compiler", return_value=result) as runner:
+            ok, error = meeting.step_write_wiki(state)
+        assert not ok and "unsupported acronym 'XYZ'" in error
+        assert runner.call_count == 1
+        assert not (work / "corrected.txt").exists()
+    finally:
+        shutil.rmtree(work)
+
+
 def main():
+    test_completed_meeting_output_preserves_current_and_historical_quality()
+    test_meeting_term_acronyms_require_their_own_cited_source()
+    test_unsupported_acronym_is_rejected_before_meeting_staging()
     test_body_source_rebinding_survives_title_change_in_both_backends()
     test_unresolved_roles_preserve_wiki_without_global_identity()
     test_source_binding_rebases_only_transaction_footnotes()
     test_identity_correction_requires_archived_exact_assertion()
-    test_transaction_id_has_microseconds_and_random_suffix()
     test_source_binding_rebases_all_yaml_styles_in_both_backends()
     test_wiki_validation_rejects_noncanonical_or_missing_sources()
     test_api_retry_injects_latest_persisted_response_and_diagnostic()

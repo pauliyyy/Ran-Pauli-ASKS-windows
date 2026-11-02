@@ -125,48 +125,6 @@ class PrivateReingestTests(unittest.TestCase):
             self.assertIsNone(conn.execute("SELECT 1 FROM edges WHERE subject=? AND object=?",
                                            (self.page, self.page)).fetchone())
 
-    def test_commit_rejects_page_path_and_alias_self_edges(self):
-        self.wiki.write_text(self.wiki.read_text().replace(
-            'type: health-record', 'type: health-record\naliases: [Private record alias]'))
-        for index, endpoint in enumerate((self.page, self.page + '.md', 'Private record alias')):
-            with self.subTest(endpoint=endpoint):
-                txn, workspace = self.prepare_candidate('self-edge-' + str(index))
-                candidate = workspace / 'candidate.md'
-                candidate.write_text(candidate.read_text().replace(
-                    'type: health-record', 'type: health-record\naliases: [Private record alias]'))
-                (workspace / 'semantic.txt').write_text(
-                    '三元组:\n  本文件|来源|' + endpoint + '\n', encoding='utf-8')
-                pr.validate(txn)
-                before_wiki = digest(self.wiki)
-                before_public = digest(self.public)
-                with self.assertRaisesRegex(ValueError, 'self-edge'):
-                    pr.commit(txn)
-                self.assertEqual(digest(self.wiki), before_wiki)
-                self.assertEqual(digest(self.public), before_public)
-                self.assertEqual(json.loads((workspace / 'state.json').read_text())['status'], 'failed')
-                with gl.connect(self.private, read_only=True) as conn:
-                    self.assertIsNone(conn.execute(
-                        'SELECT 1 FROM edges WHERE subject=? AND object=?',
-                        (self.page, self.page)).fetchone())
-
-    def test_shared_title_or_alias_is_not_assumed_to_be_page_identity(self):
-        for index, name in enumerate(('Synthetic private record', 'Shared private alias')):
-            with self.subTest(endpoint=name):
-                with gl.connect(self.private) as conn:
-                    other = 'private/wiki/health/other-record'
-                    gl.ensure_node(conn, other, 'Other private record', 'page')
-                    gl.insert_aliases(conn, other, [name])
-                txn, workspace = self.prepare_candidate('shared-name-' + str(index))
-                candidate = workspace / 'candidate.md'
-                candidate.write_text(candidate.read_text().replace(
-                    'type: health-record', 'type: health-record\naliases: [Shared private alias]'))
-                (workspace / 'semantic.txt').write_text(
-                    '三元组:\n  本文件|来源|' + name + '\n', encoding='utf-8')
-                pr.validate(txn)
-                before_public = digest(self.public)
-                self.assertEqual(pr.commit(txn)['status'], 'completed')
-                self.assertEqual(digest(self.public), before_public)
-
     def test_unicode_page_names_get_safe_private_workspaces(self):
         page = "private/wiki/metaphysics/貔貅部.md"
         raw = self.root / "private/raw/metaphysics/貔貅部.md"

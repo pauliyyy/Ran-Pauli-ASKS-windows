@@ -46,9 +46,6 @@ cross-domain/embeddings.db-shm
 # Knowledge content and local runtime artifacts
 # This public template keeps only explicit synthetic examples.
 projects/**
-!projects/_templates/
-!projects/_templates/research/
-!projects/_templates/research/**
 **/raw/**
 !**/raw/.gitkeep
 **/wiki/**

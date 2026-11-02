@@ -13,11 +13,13 @@ import tempfile
 import zipfile
 from xml.etree import ElementTree as ET
 
+from platform_compat import default_cjk_font
+
 REPO = Path(__file__).resolve().parent.parent
 SCHEMA = "presentation-runtime-v1"
 TEXT_EN = "Editable presentation runtime"
 TEXT_ZH = "中文排版测试：知识与证据"
-FONTS = {"latin": "Arial", "cjk": "PingFang SC"}
+FONTS = {"latin": "Arial", "cjk": default_cjk_font(mac_default="PingFang SC")}
 
 
 class RuntimeProbeError(RuntimeError):

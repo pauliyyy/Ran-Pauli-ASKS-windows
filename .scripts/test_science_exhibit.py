@@ -15,6 +15,43 @@ import science_exhibit as exhibit
 import science_exhibit_render as renderer
 
 
+def test_new_store_font_selection_preserves_explicit_and_stored_fonts():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory).resolve()
+        (root / 'projects/fixture').mkdir(parents=True)
+        with patch.object(exhibit, 'REPO', root), \
+                patch.object(exhibit, 'default_cjk_font', return_value='PlatformFixture') as select:
+            default_store = root / 'projects/fixture/exhibits/default'
+            exhibit.init_store(default_store)
+            assert exhibit.load_state(default_store)['brief']['font'] == 'PlatformFixture'
+            select.assert_called_once_with()
+            explicit_store = root / 'projects/fixture/exhibits/explicit'
+            exhibit.init_store(explicit_store, font='ExplicitFixture')
+            assert exhibit.load_state(explicit_store)['brief']['font'] == 'ExplicitFixture'
+            select.assert_called_once_with()
+            rejected_store = root / 'projects/fixture/exhibits/empty'
+            fails(lambda: exhibit.init_store(rejected_store, font=''))
+            assert not rejected_store.exists()
+        with patch.object(exhibit, 'REPO', root), \
+                patch.object(exhibit, 'default_cjk_font', side_effect=AssertionError('Stored fonts must not be replaced')):
+            assert exhibit.load_state(default_store)['brief']['font'] == 'PlatformFixture'
+            assert exhibit.load_state(explicit_store)['brief']['font'] == 'ExplicitFixture'
+
+
+def test_requested_missing_font_is_rejected_without_substitution():
+    import visual_qa
+    result = SimpleNamespace(stdout='AvailableSubstitute\n/not-used/font.ttc\n0\n')
+    with patch.object(visual_qa, '_find_soffice', return_value='TEST-ONLY'), \
+            patch.object(visual_qa, '_soffice_env', return_value={}), \
+            patch.object(renderer.subprocess, 'run', return_value=result):
+        try:
+            renderer.font_info('RequestedButMissing')
+        except ValueError as exc:
+            assert str(exc) == 'Requested font unavailable: RequestedButMissing'
+        else:
+            raise AssertionError('A missing explicit or stored font was silently substituted')
+
+
 def test_typographic_units():
     assert renderer.typographic_units(list('甲乙丙丁。')) == ['甲', '乙', '丙', '丁。']
     assert renderer.typographic_units(list('甲（乙）丙')) == ['甲', '（乙）', '丙']
@@ -28,6 +65,54 @@ def test_typographic_units():
         font = {'path': 'TEST-ONLY', 'index': 0}
         assert renderer.wrap_text('甲乙丙丁。', width_mm, 100, 1, font) == '甲乙丙\n丁。'
         assert renderer.wrap_text('甲乙丙（丁）', width_mm, 100, 1, font) == '甲乙丙\n（丁）'
+
+
+def test_font_info_uses_measured_collection_metrics():
+    import visual_qa
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'synthetic-font.ttc'
+        path.write_bytes(b'TEST-ONLY synthetic font metrics fixture')
+        for metrics, expected_inset in (((1160, 288), 0.074), ((800, 200), 0)):
+            calls = []
+            def load_font(filename, size, *, index):
+                calls.append((filename, size, index))
+                return SimpleNamespace(getmetrics=lambda: metrics)
+            image_font = SimpleNamespace(truetype=load_font)
+            result = SimpleNamespace(stdout=f'TestFont\n{path}\n2\n')
+            with patch.dict('sys.modules', {'PIL': SimpleNamespace(ImageFont=image_font)}), \
+                    patch.object(visual_qa, '_find_soffice', return_value='TEST-ONLY'), \
+                    patch.object(visual_qa, '_soffice_env', return_value={}), \
+                    patch.object(renderer.subprocess, 'run', return_value=result):
+                info = renderer.font_info('TestFont')
+            assert calls == [(str(path), 1000, 2)]
+            assert abs(info['top_inset_em'] - expected_inset) < 1e-12
+            assert info['sha256'] == renderer.file_hash(path)
+
+
+def test_font_metric_overhang_counts_against_text_capacity():
+    measured = SimpleNamespace(getlength=len)
+    image_font = SimpleNamespace(truetype=lambda *args, **kwargs: measured)
+    font = {'path': 'TEST-ONLY', 'index': 0, 'top_inset_em': 0.074}
+    original = deepcopy(font)
+    with patch.dict('sys.modules', {'PIL': SimpleNamespace(ImageFont=image_font)}):
+        assert renderer.wrap_text('甲', 100, 14.5 / renderer.POINTS_PER_MM, 10, font) == '甲'
+        fails(lambda: renderer.wrap_text('甲', 100, 14.4 / renderer.POINTS_PER_MM, 10, font))
+        assert renderer.wrap_text('甲\n乙', 100, 27.5 / renderer.POINTS_PER_MM, 10, font) == '甲\n乙'
+        fails(lambda: renderer.wrap_text('甲\n乙', 100, 27.4 / renderer.POINTS_PER_MM, 10, font))
+    assert font == original
+
+
+def test_rendered_lines_match_objects_not_overlapping_empty_boxes():
+    import fitz
+    factor = renderer.POINTS_PER_MM
+    objects = [{'id': 'heading', 'type': 'text', 'bbox_mm': [10, 10, 100, 20], 'text': '主标题'},
+               {'id': 'caption', 'type': 'text', 'bbox_mm': [80, 20, 30, 10], 'text': '图注'}]
+    lines = [(fitz.Rect(10, 10, 40, 18) * factor, '主标题'),
+             (fitz.Rect(80, 20, 100, 28) * factor, '图注')]
+    renderer.validate_rendered_lines(objects, lines)
+    fails(lambda: renderer.validate_rendered_lines(objects, lines + [lines[0]]))
+    fails(lambda: renderer.validate_rendered_lines(objects, [(lines[0][0], '主'), lines[1]]))
+    fails(lambda: renderer.validate_rendered_lines(objects, [(fitz.Rect(5, 10, 40, 18) * factor, '主标题'), lines[1]]))
 
 
 @contextmanager
@@ -312,6 +397,23 @@ def test_actual_render(font, output=None):
         for name, expected_hash in manifest['files'].items():
             assert exhibit.file_hash(directory / name) == expected_hash
         layout = exhibit.read_json(directory / 'layout.json')
+        from pptx import Presentation
+        from pptx.enum.text import MSO_ANCHOR, MSO_AUTO_SIZE, PP_ALIGN
+        native = {shape.name: shape for shape in Presentation(directory / 'board.pptx').slides[0].shapes}
+        font_metrics = renderer.font_info(font)
+        for obj in layout['objects']:
+            if obj['type'] != 'text':
+                continue
+            frame = native[obj['id']].text_frame
+            assert frame.auto_size == MSO_AUTO_SIZE.NONE
+            assert frame.vertical_anchor == MSO_ANCHOR.TOP
+            assert frame._txBody.bodyPr.get('anchorCtr') == '0'
+            assert frame.margin_left == frame.margin_right == frame.margin_bottom == 0
+            assert abs(frame.margin_top.pt - obj['font_pt'] * font_metrics['top_inset_em']) < 0.001
+            for paragraph in frame.paragraphs:
+                assert paragraph.alignment == {'left': PP_ALIGN.LEFT, 'center': PP_ALIGN.CENTER, 'right': PP_ALIGN.RIGHT}[obj.get('align', 'left')]
+                assert abs(paragraph.line_spacing.pt - obj['font_pt'] * 1.3) < 0.01
+                assert all(abs(run.font.size.pt - obj['font_pt']) < 0.01 for run in paragraph.runs)
         body_objects = [obj for obj in layout['objects'] if obj.get('panel_id') and obj['id'].endswith('-body')]
         assert len(body_objects) == 4 and all(obj['claim_ids'] for obj in body_objects)
         overflow = deepcopy(state['content'])
@@ -351,13 +453,102 @@ def test_source_drift_and_fsync_failure_during_build():
             assert exhibit.file_hash(store / 'current.json') == state_hash
 
 
+def composition_content(root, source, store):
+    from PIL import Image
+    import science_exhibit_composition as composition
+    image = root / 'projects/fixture/synthetic.png'
+    Image.new('RGB', (160, 80), '#267F86').save(image)
+    asset = composition.import_asset(exhibit, store, image, '合成插图，仅用于工程检查', 'TEST-ONLY，不是实验图或科学结论')
+    texts = [
+        {'id': 'title', 'text': '合成科学展板', 'roles': [], 'claim_ids': []},
+        {'id': 'hook', 'text': '怎样保留理解主线？', 'roles': ['question'], 'claim_ids': ['claim-1']},
+        {'id': 'takeaway', 'text': '仅用于工程检查，不对应真实科学研究。',
+         'roles': ['approach', 'finding', 'boundary'], 'claim_ids': ['claim-1']},
+    ]
+    objects = []
+    for identifier, top, size, height in [('title', 40, 40, 80), ('hook', 160, 28, 70),
+                                           ('takeaway', 300, 24, 100), ('source-label', 1180, 16, 100),
+                                           ('draft-label', 1320, 12, 45)]:
+        objects.append({'id': 'text-' + identifier, 'type': 'text', 'x': 40, 'y': top,
+                        'w': 920, 'h': height, 'size': size, 'color': '#18323B', 'bold': False,
+                        'align': 'left', 'text_ref': identifier, 'claim_ids': []})
+    objects.insert(3, {'id': 'main-image', 'type': 'image', 'x': 40, 'y': 600, 'w': 600, 'h': 300,
+                       'asset_id': asset['id'], 'claim_ids': ['claim-1']})
+    return {'schema': 'science-exhibit-content-v2', 'claims': content(source, root)['claims'],
+            'texts': texts, 'assets': [asset], 'composition': {'schema': 'science-exhibit-composition-v1',
+                'canvas': [1000, 1400], 'background': '#F7FAF8', 'objects': objects}}
+
+
+def test_composition_content_assets_and_legacy_compatibility():
+    import science_exhibit_composition as composition
+    with fixture() as (root, source, store):
+        candidate = composition_content(root, source, store)
+        state = exhibit.load_state(store)
+        exhibit.validate_content(candidate, state)
+        request = exhibit.prepare(store, 0)
+        exhibit.atomic_json(root / request['agent_task']['outputs'][0]['path'], candidate)
+        exhibit.check_or_commit(root / request['request_path'], commit=True)
+        assert exhibit.check_or_commit(root / request['request_path'], commit=True)['already_committed']
+        assert exhibit.load_state(store)['content'] == candidate
+        for change in ('missing_text', 'missing_role', 'stretch', 'lost_qualifier', 'unknown_claim', 'hidden_asset', 'extra_field'):
+            bad = deepcopy(candidate)
+            if change == 'missing_text':
+                bad['composition']['objects'].pop()
+            elif change == 'missing_role':
+                bad['texts'][-1]['roles'].remove('boundary')
+            elif change == 'stretch':
+                bad['composition']['objects'][3]['w'] = 500
+            elif change == 'lost_qualifier':
+                bad['texts'][-1]['text'] = '未保留科学限定'
+            elif change == 'unknown_claim':
+                bad['texts'][-1]['claim_ids'] = ['unknown']
+            elif change == 'hidden_asset':
+                bad['composition']['objects'].pop(3)
+            else:
+                bad['composition']['objects'][0]['script'] = 'untrusted'
+            fails(lambda: exhibit.validate_content(bad, state))
+        asset = root / candidate['assets'][0]['path']
+        asset.write_bytes(b'changed')
+        fails(lambda: exhibit.validate_content(candidate, state))
+        symlink = root / 'projects/fixture/link.png'
+        symlink.symlink_to(root / 'projects/fixture/synthetic.png')
+        fails(lambda: composition.import_asset(exhibit, store, symlink, 'TEST-ONLY', '合成测试'))
+
+
+def test_actual_composition_render(font):
+    import science_exhibit_composition as composition
+    from PIL import Image
+    with fixture() as (root, source, store):
+        state = exhibit.load_state(store)
+        candidate = composition_content(root, source, store)
+        jpeg = root / 'projects/fixture/synthetic.jpg'
+        Image.new('RGB', (160, 80), '#7967A2').save(jpeg)
+        asset = composition.import_asset(exhibit, store, jpeg, '合成JPEG，仅用于工程测试', '显式居中裁切测试，非科学证据')
+        candidate['assets'].append(asset)
+        candidate['composition']['objects'].insert(4, {'id': 'cropped-jpeg', 'type': 'image', 'x': 650, 'y': 600,
+            'w': 300, 'h': 300, 'fit': 'cover', 'asset_id': asset['id'], 'claim_ids': []})
+        state['brief']['font'] = font
+        exhibit.validate_content(candidate, state)
+        directory = store / 'actual-mixed-render'
+        directory.mkdir()
+        result = renderer.render(candidate, state['brief'], directory, canvas_mm=[594, 841])
+        assert result['mechanical_status'] == 'passed' and result['image_object_count'] == 2
+        assert len(result['image_assets']) == 2 and result['image_effective_dpi']
+        assert str(root) not in (directory / 'layout.json').read_text()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--render', action='store_true')
-    parser.add_argument('--font', default='Heiti SC')
+    parser.add_argument('--font', default=exhibit.default_cjk_font())
     parser.add_argument('--output')
     args = parser.parse_args()
+    test_new_store_font_selection_preserves_explicit_and_stored_fonts()
+    test_requested_missing_font_is_rejected_without_substitution()
+    test_font_info_uses_measured_collection_metrics()
+    test_font_metric_overhang_counts_against_text_capacity()
     test_typographic_units()
+    test_rendered_lines_match_objects_not_overlapping_empty_boxes()
     test_visible_acronym_definitions()
     test_creation_validation_and_idempotency()
     test_content_rejections_and_source_drift()
@@ -365,8 +556,10 @@ def main():
     test_path_safety_bad_json_and_snapshot_corruption()
     test_failed_pointer_publish_and_failed_render()
     test_source_drift_and_fsync_failure_during_build()
+    test_composition_content_assets_and_legacy_compatibility()
     if args.render:
         test_actual_render(args.font, args.output)
+        test_actual_composition_render(args.font)
     print('science exhibit regression: PASS' + (' (actual render)' if args.render else ''))
 
 

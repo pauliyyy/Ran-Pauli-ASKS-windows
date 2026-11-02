@@ -1,12 +1,12 @@
 {
-  "manifest_sha256": "c488e75cc03615e2255a35cbac14378ca5deca4de6959474c9e7fa4d69db2555",
-  "payload_sha256": "8985d0a3d871a04e793963c0eda730013218e682c6433c1e06a13dd5b42a35d9",
+  "manifest_sha256": "8ebd12a7d066616d0b3ae8eb3e4cb795a763174e3845c131206132d013680f62",
+  "payload_sha256": "7f991ca1acdf9ffe6826c8e38e246befa84e08d10a054f0724f3d79990d6243f",
   "pdf_render_health": {
     "docs/introduction/ASKS-Chinese-Introduction-2026-09-03.pdf": {
-      "page_count": 24,
+      "page_count": 30,
       "pages": [
         {
-          "ink_pixels": 13859,
+          "ink_pixels": 13861,
           "page": 1,
           "text_chars": 577
         },
@@ -106,12 +106,12 @@
           "text_chars": 903
         },
         {
-          "ink_pixels": 16437,
+          "ink_pixels": 16436,
           "page": 21,
           "text_chars": 928
         },
         {
-          "ink_pixels": 17635,
+          "ink_pixels": 17636,
           "page": 22,
           "text_chars": 921
         },
@@ -124,15 +124,45 @@
           "ink_pixels": 9266,
           "page": 24,
           "text_chars": 650
+        },
+        {
+          "ink_pixels": 19245,
+          "page": 25,
+          "text_chars": 973
+        },
+        {
+          "ink_pixels": 5756,
+          "page": 26,
+          "text_chars": 273
+        },
+        {
+          "ink_pixels": 10567,
+          "page": 27,
+          "text_chars": 512
+        },
+        {
+          "ink_pixels": 8169,
+          "page": 28,
+          "text_chars": 458
+        },
+        {
+          "ink_pixels": 18058,
+          "page": 29,
+          "text_chars": 1166
+        },
+        {
+          "ink_pixels": 14327,
+          "page": 30,
+          "text_chars": 867
         }
       ]
     }
   },
   "schema": "wikigraph-public-release-provenance-v1",
   "source": {
-    "commit": "28cc667c3aee48de5d72ad293c5addc932f8e5e4",
-    "mode": "committed",
-    "tree": "5ec4415852d3aa77013a15fe125d0a78a21877d4"
+    "commit": "17adee8541b77bad83f70baab813530ada03f751",
+    "mode": "working-tree",
+    "tree": "bde2922e55c6aff0c048b9c72ac2c597e16f628c"
   },
-  "version": "0.17.0"
+  "version": "0.22.0"
 }

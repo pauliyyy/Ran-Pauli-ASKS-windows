@@ -23,15 +23,14 @@ from datetime import datetime
 from glob import escape as glob_escape
 from itertools import chain
 from pathlib import Path
-from secrets import token_hex
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / ".scripts"))
 import agent_task
+import document_text
 import inbox_state
 import image_ocr
 import pptx_document
-import document_text
 import trash_util
 import ingest_common as ic
 import ingest_pipeline
@@ -162,12 +161,6 @@ def slugify(text: str) -> str:
     return text[:60] if text else "untitled"
 
 
-def new_transaction_id(source_stem: str) -> str:
-    """Return a sortable, collision-resistant transaction identifier."""
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    return f"{timestamp}-{slugify(source_stem)[:20]}-{token_hex(4)}"
-
-
 def resume_command(state: dict) -> str:
     """Return the public resume entry without changing the transaction backend."""
     txn = state["transaction_id"]
@@ -275,7 +268,7 @@ def extract_doc_text(source_path: Path, extract_dir: Path | None = None) -> str:
     if suffix in (".txt", ".md"):
         return source_path.read_text(encoding="utf-8")
     if suffix in (".docx", ".doc"):
-        return document_text.extract_word_text(source_path)
+        return document_text.extract_word_text(source_path, timeout=120)
     if suffix == ".pptx":
         return pptx_document.extract(source_path)[0]
     if suffix == ".pdf":
@@ -306,6 +299,16 @@ def extract_doc_text(source_path: Path, extract_dir: Path | None = None) -> str:
             )
             if md_path.is_file():
                 return md_path.read_text(encoding="utf-8")
+        # The document extractor may be unavailable even when every page has
+        # a usable text layer. Keep the PDF as the source and extract locally.
+        try:
+            import fitz
+            with fitz.open(str(source_path)) as document:
+                pages = [page.get_text(sort=True).strip() for page in document]
+            if pages and all(len(page) >= 50 for page in pages):
+                return "\n\n".join(pages) + "\n"
+        except Exception:
+            pass
         return ""
     return ""
 
@@ -626,16 +629,6 @@ def ensure_graph_snapshot(state: dict) -> None:
     if state.get("graph_snapshot"):
         return
     graph_db = Path(gl.graph_db_for(state.get("wiki_path", "")))
-    if not graph_db.exists():
-        # A pristine host-owned tenant starts without a generated graph. Create
-        # its own empty schema before the read-only rollback snapshot; facts
-        # are still written only by the validated graph commit below.
-        graph_db.parent.mkdir(parents=True, exist_ok=True)
-        conn = gl.connect(graph_db)
-        try:
-            gl.init_schema(conn)
-        finally:
-            conn.close()
     snapshot = REPO / state["extract_dir"] / "graph-before.sqlite"
     backup_sqlite_database(graph_db, snapshot)
     state["graph_snapshot"] = str(snapshot.relative_to(REPO))
@@ -1007,7 +1000,7 @@ def _companion_record(state: dict, source_path: Path, companion_path: Path,
         limitations = ["rendered-format-and-formula-recalculation-require-original"]
         review_status = None
     elif suffix == ".pdf":
-        generator = {"name": "extractor", "version": "1"}
+        generator = {"name": "ingest_document.extract_doc_text", "version": "1"}
         locator_scheme = "line"
         method = "document-text-extraction"
         limitations = ["layout-and-nontext-visuals-require-original"]
@@ -2060,7 +2053,7 @@ def step_finalize_tail(state: dict) -> tuple[bool, str]:
 
 DOCUMENT_SPEC = {
     "script_name": "ingest_document.py",
-    "preprocess_label": "文档提取（Word/演示文稿/PDF/图片 OCR）",
+    "preprocess_label": "文档提取（textutil/pandoc/image OCR）",
     "completion_label_key": None,
     "cleanup_after": "finalize_tail",
     "rollback_fn": rollback_committed,
@@ -2309,7 +2302,7 @@ def main() -> None:
         file_path = (REPO / args.file).resolve()
         if not file_path.is_file():
             raise SystemExit(f"ERROR: 文件不存在: {args.file}")
-        txn_id = new_transaction_id(file_path.stem)
+        txn_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + slugify(file_path.stem)[:20]
         state = {
             "transaction_id": txn_id,
             "status": "dedup_check",
@@ -2336,6 +2329,7 @@ def main() -> None:
         state["retry_ppt_api"] = True
         if agent_task.is_prepared(state) and state["agent_task"]["kind"] in {"pptx_review", "pptx_api_action"}:
             inbox_state.transition(state, "preprocess", reason="explicit_ppt_api_input")
+            inbox_state.save(state["transaction_id"], state)
     if (args.ocr_result or args.allow_remote_ocr) \
             and Path(state.get("source", "")).suffix.lower() not in image_ocr.IMAGE_SUFFIXES:
         parser.error("OCR 参数只适用于图片来源")
@@ -2350,6 +2344,7 @@ def main() -> None:
             and state["agent_task"]["kind"] in {"image_ocr", "image_review", "image_ocr_authorization",
                                                "image_confirmation", "image_api_retry"}:
         inbox_state.transition(state, "preprocess", reason="explicit_ocr_input")
+        inbox_state.save(state["transaction_id"], state)
     if (state.get("subproject") == "academic" and
             state.get("document_type") not in ACADEMIC_DOCUMENT_TYPES):
         print(json.dumps({

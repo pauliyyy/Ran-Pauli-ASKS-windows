@@ -22,6 +22,7 @@ FOUNDATION = [
     ".scripts/test_engineering_graph.py",
     ".scripts/test_engineering_locator.py",
     ".scripts/test_wg.py",
+    ".scripts/test_review.py",
     "dsh/test_weak_model_governance_eval.py",
 ]
 RELEASE = FOUNDATION + [
@@ -30,6 +31,8 @@ RELEASE = FOUNDATION + [
     ".scripts/test_paper_artifact.py",
     ".scripts/paper_artifact.py verify paper-artifacts/v0.2.0",
     "paper-artifacts/v0.2.1/verify.py",
+    ".scripts/test_platform_compat.py",
+    ".scripts/test_document_text.py",
 ]
 
 

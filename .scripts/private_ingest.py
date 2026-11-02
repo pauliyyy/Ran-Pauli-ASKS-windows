@@ -328,29 +328,17 @@ def _backfill_completed_pdf_companion(workspace: Path, state: dict) -> dict:
         if not destination.is_file() or pr._file_sha(destination) != companion_item["sha256"]:
             raise ValueError("completed PDF companion is missing or changed")
 
-    sidecar_name = sl.companion_sidecar_name(document_name)
-    staged_sidecar = _safe(workspace / "bundle" / sidecar_name)
-    companion_record = state.get("companion")
-    if companion_record is None and staged_sidecar.exists():
-        # Retained metadata records the original extraction time and generator.
-        # Reuse it only after the same shared hash-binding check as a new bundle.
-        retained_context = json.loads(staged_sidecar.read_text(encoding="utf-8"))
-        retained_record = (retained_context.get("companion")
-                           if isinstance(retained_context, dict) else None)
-        retained_companion = staged if staged.is_file() else destination
-        binding = sl.companion_record_status(source, retained_companion, retained_record)
-        if binding["status"] != "valid":
-            raise ValueError("legacy PDF retained companion binding invalid: " + binding["reason"])
-        companion_record = retained_record
-    if companion_record is None:
-        companion_record = _private_companion_record(source, companion_name, data, pdf=True)
+    companion_record = state.get("companion") or _private_companion_record(
+        source, companion_name, data, pdf=True)
     if sl.companion_record_status(source, destination, companion_record)["status"] != "valid" \
             and destination.is_file():
         raise ValueError("completed PDF companion binding does not match archived files")
+    sidecar_name = sl.companion_sidecar_name(document_name)
     sidecar_destination = str(Path(pdf_item["destination"]).with_name(sidecar_name))
     sidecar_data = (json.dumps(_sidecar(source, companion=companion_record),
                                ensure_ascii=False, indent=2) + "\n").encode()
     sidecar = _safe(gl.REPO / sidecar_destination)
+    staged_sidecar = _safe(workspace / "bundle" / sidecar_name)
     sidecar_item = next((item for item in state["files"]
                          if item["destination"] == sidecar_destination), None)
     if sidecar_item is not None:
@@ -497,7 +485,6 @@ def commit(txn: str) -> dict:
                              triples_json=None, knowledge_ir=None, knowledge_ir_out=None,
                              graph_plan_out=None, page_file=None, raw_source_override=None,
                              raw_relationship_json=None)
-            pr._reject_page_self_edges(workspace, state)
             with redirect_stdout(io.StringIO()):
                 gi._cmd_ingest_locked(args)
             errors, graph_warnings = pr._graph_validation(target)

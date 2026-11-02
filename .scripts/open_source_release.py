@@ -432,9 +432,7 @@ def projected_engineering_graph(destination: Path) -> dict:
             return True
         if path == PUBLIC_GRAPH_PATH:
             return True
-        if (path.startswith(".project/")
-                or (path.startswith("projects/")
-                    and not path.startswith("projects/_templates/research/"))):
+        if path.startswith("projects/") or path.startswith(".project/"):
             return False
         return bool(node.get("optional", False)) or (destination / path).exists()
 

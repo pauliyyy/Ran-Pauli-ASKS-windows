@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-"""Portable adapters for host commands used by shared workflows."""
+"""Shared host adapters for deterministic Word extraction and rendering."""
 from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 from typing import Callable, Mapping
-
 
 Which = Callable[[str], str | None]
 
@@ -24,6 +22,7 @@ def _executable(path: str | Path | None) -> Path | None:
     return None
 
 
+
 def find_executable(*names: str, which: Which = shutil.which) -> Path | None:
     """Return the first executable resolved from ``PATH``."""
     for name in names:
@@ -31,6 +30,7 @@ def find_executable(*names: str, which: Which = shutil.which) -> Path | None:
         if resolved is not None:
             return resolved
     return None
+
 
 
 def find_soffice(
@@ -76,6 +76,27 @@ def find_soffice(
     return None
 
 
+
+def default_cjk_font(
+    *,
+    mac_default: str = "Heiti SC",
+    platform: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    """Return the explicit or platform-native default CJK font family."""
+    environment = os.environ if environ is None else environ
+    configured = str(environment.get("ASKS_CJK_FONT", "")).strip()
+    if configured:
+        return configured
+    host = platform or sys.platform
+    if host == "darwin":
+        return mac_default
+    if host.startswith("win"):
+        return "Microsoft YaHei"
+    return "Noto Sans CJK SC"
+
+
+
 def soffice_environment(
     soffice: str | Path,
     *,
@@ -115,135 +136,3 @@ def soffice_environment(
             break
     return env
 
-
-def default_open_commands(
-    path: str | Path,
-    *,
-    platform: str | None = None,
-    which: Which = shutil.which,
-    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
-) -> list[list[str]]:
-    """Return host opener commands in fallback order."""
-    target = str(Path(path))
-    host = platform or sys.platform
-    if host == "darwin":
-        opener = find_executable("open", which=which)
-        return [[str(opener), target]] if opener else []
-    commands: list[list[str]] = []
-    if host.startswith("linux"):
-        opener = find_executable("xdg-open", which=which)
-        if opener:
-            commands.append([str(opener), target])
-        gio = find_executable("gio", which=which)
-        if gio:
-            commands.append([str(gio), "open", target])
-        wslview = find_executable("wslview", which=which)
-        if wslview:
-            commands.append([str(wslview), target])
-        explorer = find_executable("explorer.exe", which=which)
-        if explorer:
-            explorer_target = target
-            wslpath = find_executable("wslpath", which=which)
-            if wslpath:
-                try:
-                    converted = run(
-                        [str(wslpath), "-w", target],
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                        check=False,
-                    )
-                except (OSError, subprocess.SubprocessError):
-                    converted = None
-                if converted is not None and converted.returncode == 0:
-                    windows_path = converted.stdout.strip()
-                    if windows_path:
-                        explorer_target = windows_path
-            commands.append([str(explorer), explorer_target])
-    return commands
-
-
-def default_open_command(
-    path: str | Path,
-    *,
-    platform: str | None = None,
-    which: Which = shutil.which,
-) -> list[str] | None:
-    """Return the preferred host opener command, if available."""
-    commands = default_open_commands(path, platform=platform, which=which)
-    return commands[0] if commands else None
-
-
-def open_with_default_app(
-    path: str | Path,
-    *,
-    platform: str | None = None,
-    which: Which = shutil.which,
-    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
-) -> bool:
-    """Open a generated file without making a missing desktop tool fatal."""
-    host = platform or sys.platform
-    if host.startswith("win"):
-        startfile = getattr(os, "startfile", None)
-        if startfile is None:
-            return False
-        try:
-            startfile(str(Path(path)))
-            return True
-        except OSError:
-            return False
-
-    wsl_bridge = (
-        host.startswith("linux")
-        and find_executable("wslpath", which=which) is not None
-        and find_executable("explorer.exe", which=which) is not None
-    )
-    for command in default_open_commands(
-        path, platform=host, which=which, run=run
-    ):
-        try:
-            result = run(
-                command,
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except (OSError, subprocess.SubprocessError):
-            continue
-        launcher = Path(command[0]).name.casefold()
-        wsl_launch_accepted = (
-            wsl_bridge
-            and Path(path).exists()
-            and (
-                (launcher == "xdg-open" and result.returncode == 4)
-                or (launcher == "explorer.exe" and result.returncode == 1)
-            )
-        )
-        if result.returncode == 0 or wsl_launch_accepted:
-            return True
-    return False
-
-
-def system_trash_commands(
-    path: str | Path,
-    *,
-    platform: str | None = None,
-    which: Which = shutil.which,
-) -> list[list[str]]:
-    """Return recoverable system-trash commands in host preference order."""
-    target = str(Path(path))
-    host = platform or sys.platform
-    commands: list[list[str]] = []
-
-    if host.startswith("linux"):
-        gio = find_executable("gio", which=which)
-        if gio:
-            commands.append([str(gio), "trash", target])
-        trash_put = find_executable("trash-put", which=which)
-        if trash_put:
-            commands.append([str(trash_put), target])
-
-    trash = find_executable("trash", which=which)
-    if trash:
-        commands.append([str(trash), target])
-    return commands

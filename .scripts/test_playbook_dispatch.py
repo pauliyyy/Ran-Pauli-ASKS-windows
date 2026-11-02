@@ -165,29 +165,6 @@ def test_list_entries():
     assert "更新工程文档" in out
 
 
-
-@contextlib.contextmanager
-def public_playbook_fixture():
-    """Use declared synthetic dispatch entries; personal memory/ is not release source."""
-    original = module.PLAYBOOK
-    try:
-        module.PLAYBOOK = Path(__file__).parent / "fixtures" / "public-playbook-index.md"
-        assert module.PLAYBOOK.is_file()
-        yield
-    finally:
-        module.PLAYBOOK = original
-
-
-def test_missing_personal_playbook_is_a_clean_no_match():
-    with tempfile.TemporaryDirectory() as directory:
-        original = module.PLAYBOOK
-        try:
-            module.PLAYBOOK = Path(directory) / "not-installed.md"
-            assert module.dispatch("摄入 inbox") is None
-        finally:
-            module.PLAYBOOK = original
-
-
 def main():
     test_dispatch_hit_ingest()
     test_dispatch_prefers_explicit_specialized_trigger()
@@ -205,6 +182,4 @@ def main():
 
 
 if __name__ == "__main__":
-    test_missing_personal_playbook_is_a_clean_no_match()
-    with public_playbook_fixture():
-        main()
+    main()
